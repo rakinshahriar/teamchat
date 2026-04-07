@@ -4,10 +4,10 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>TeamChat</title>
-    <link rel="stylesheet" href="/app.css?v=20260407-11" />
+    <link rel="stylesheet" href="/app.css?v=20260408-3" />
     <script src="https://accounts.google.com/gsi/client" async defer></script>
-    <script src="/config.js?v=20260407-11" defer></script>
-    <script src="/app.js?v=20260407-11" defer></script>
+    <script src="/config.js?v=20260408-3" defer></script>
+    <script src="/app.js?v=20260408-3" defer></script>
   </head>
   <body>
     <main class="shell">
@@ -16,6 +16,8 @@
           <div class="brand">TC</div>
           <h1>Welcome to TeamChat</h1>
           <p class="sub">Connect with users, accept requests, and chat privately.</p>
+          <input id="welcomeToggle" class="welcome-toggle" type="checkbox" />
+          <label for="welcomeToggle" class="welcome-toggle-label">Show details</label>
           <ul class="feature-list">
             <li>Search and connect with other users</li>
             <li>Accept requests to unlock chat</li>
@@ -24,9 +26,10 @@
         </aside>
 
         <div class="card auth-main">
-          <p class="eyebrow">Sign In</p>
-          <h2>Access your account</h2>
-          <p class="sub">Use Google for one-click sign in, or continue with email and password.</p>
+          <p id="portraitWelcomeText" class="portrait-welcome">Welcome back to TeamChat</p>
+          <p id="authEyebrow" class="eyebrow">Sign In</p>
+          <h2 id="authTitle"></h2>
+          <p id="authSubtitle" class="sub"></p>
 
           <div id="loginNotice" class="notice status-muted" role="status" aria-live="polite"></div>
 
@@ -35,8 +38,16 @@
               <h3>Login</h3>
               <div class="tile-form">
                 <form id="manualLoginForm" class="auth-form primary-login">
-                  <input id="loginEmail" type="email" placeholder="Email address" required />
-                  <input id="loginPassword" type="password" placeholder="Password" required />
+                  <div class="field-head">
+                    <label for="loginEmail">Email</label>
+                    <a href="#" aria-label="Forgot email">Forgot email?</a>
+                  </div>
+                  <input id="loginEmail" type="email" placeholder="" required />
+                  <div class="field-head">
+                    <label for="loginPassword">Password</label>
+                    <a href="/reset-password.html" aria-label="Forgot password">Forgot password?</a>
+                  </div>
+                  <input id="loginPassword" type="password" placeholder="" required />
                   <button type="submit">Login</button>
                 </form>
               </div>
@@ -51,6 +62,10 @@
                   <input id="registerEmail" type="email" placeholder="Email address" required />
                   <input id="registerPassword" type="password" placeholder="Password" minlength="10" required />
                   <small>Password needs upper, lower, number, and symbol.</small>
+                  <label class="terms-check" for="registerTerms">
+                    <input id="registerTerms" type="checkbox" required />
+                    <span>I confirm I am of legal age and agree to the <button id="termsOpenBtn" class="terms-link" type="button">Terms of Service</button></span>
+                  </label>
                   <button type="submit">Register</button>
                 </form>
                 <button data-auth-switch="login" class="toggle-link" type="button">Back to login</button>
@@ -58,17 +73,43 @@
             </section>
           </div>
 
-          <div class="auth-divider">or continue with Google</div>
-
-          <div class="google-wrap">
-            <div id="googleButton"></div>
+          <div class="sso-stack">
+            <div id="googleButton" class="sso-google-btn"></div>
+            <div class="company-sso-row">
+              <button id="companySsoBtn" class="sso-btn ghost" type="button">Sign in with SSO</button>
+            </div>
           </div>
+
+          <div class="or-divider" aria-hidden="true"><span>or</span></div>
+
+          <p class="auth-note">By continuing, you confirm legal age and accept the TeamChat Terms of Service.</p>
 
           <div class="auth-links">
             <a href="/reset-password.html">Reset password</a>
+            <a href="/terms.html">Terms</a>
           </div>
         </div>
       </section>
+
+      <dialog id="termsDialog" class="terms-dialog">
+        <form method="dialog" class="terms-dialog-card">
+          <h3>Terms of Service</h3>
+          <iframe class="terms-frame" src="/terms.html" title="TeamChat Terms of Service"></iframe>
+          <button id="termsCloseBtn" class="ghost" type="submit">Close</button>
+        </form>
+      </dialog>
+
+      <dialog id="companySsoDialog" class="terms-dialog">
+        <form id="companySsoForm" method="dialog" class="terms-dialog-card">
+          <h3>Continue with Company SSO</h3>
+          <p class="sub" style="margin: 0">Enter your company domain or company name to continue.</p>
+          <input id="companySsoDomainInput" type="text" placeholder="acme.com" maxlength="160" required />
+          <div class="row" style="justify-content: flex-end">
+            <button id="companySsoCancelBtn" class="ghost" type="button">Cancel</button>
+            <button id="companySsoContinueBtn" type="submit">Continue</button>
+          </div>
+        </form>
+      </dialog>
 
       <section class="card hidden" id="appCard">
         <header class="row spread">

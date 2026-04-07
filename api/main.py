@@ -5,13 +5,17 @@ import os
 import re
 import secrets
 import uuid
+import base64
 from datetime import datetime, timedelta, timezone
 from email.message import EmailMessage
 from typing import Any, Optional
+from urllib.parse import urlencode
 
 import psycopg
+import requests
 from fastapi import Cookie, FastAPI, Header, HTTPException, Request, Response, status
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import RedirectResponse
 from google.auth.transport import requests as google_requests
 from google.oauth2 import id_token
 from pydantic import BaseModel, Field
@@ -21,11 +25,21 @@ app = FastAPI()
 
 DATABASE_URL = os.getenv("DATABASE_URL", "")
 GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID", "").strip()
+GITHUB_CLIENT_ID = os.getenv("GITHUB_CLIENT_ID", "").strip()
+GITHUB_CLIENT_SECRET = os.getenv("GITHUB_CLIENT_SECRET", "")
+OIDC_PROVIDERS_JSON = os.getenv("OIDC_PROVIDERS_JSON", "").strip()
 SESSION_COOKIE_NAME = "session_token"
+SSO_STATE_COOKIE_NAME = "sso_state"
+SSO_COMPANY_COOKIE_NAME = "sso_company"
+SSO_PKCE_COOKIE_NAME = "sso_pkce_verifier"
+SSO_PROVIDER_COOKIE_NAME = "sso_provider_key"
+SSO_INTENT_COOKIE_NAME = "sso_intent"
+SSO_DISPLAY_NAME_COOKIE_NAME = "sso_display_name"
 SESSION_TTL_DAYS = int(os.getenv("SESSION_TTL_DAYS", "7"))
 COOKIE_SECURE = os.getenv("COOKIE_SECURE", "false").lower() == "true"
 WEB_ORIGIN = os.getenv("WEB_ORIGIN", "http://localhost:3000")
 APP_BASE_URL = os.getenv("APP_BASE_URL", WEB_ORIGIN).rstrip("/")
+PUBLIC_API_BASE_URL = os.getenv("PUBLIC_API_BASE_URL", "").strip().rstrip("/")
 REQUIRE_EMAIL_VERIFICATION = os.getenv("REQUIRE_EMAIL_VERIFICATION", "true").lower() == "true"
 TOKEN_PREVIEW_IN_RESPONSE = os.getenv("TOKEN_PREVIEW_IN_RESPONSE", "true").lower() == "true"
 SMTP_HOST = os.getenv("SMTP_HOST", "").strip()
@@ -47,6 +61,8 @@ app.add_middleware(
 
 class GoogleAuthRequest(BaseModel):
     credential: str = Field(min_length=20)
+    intent: str = Field(default="login", pattern="^(login|register)$")
+    display_name: Optional[str] = Field(default=None, max_length=120)
 
 
 class RegisterRequest(BaseModel):
@@ -317,6 +333,133 @@ def _require_group_member(cur: psycopg.Cursor, group_id: uuid.UUID, user_id: uui
         raise HTTPException(status_code=403, detail="You must be a group member")
 
 
+def _company_key_from_email(email: str) -> Optional[str]:
+    parts = _normalize_email(email).split("@", 1)
+    if len(parts) != 2:
+        return None
+    domain = parts[1].strip().lower()
+    if not domain or "." not in domain:
+        return None
+    return domain
+
+
+def _ensure_company_group_membership(
+    cur: psycopg.Cursor,
+    user_id: uuid.UUID,
+    email: str,
+    provider: str,
+    provider_company_key: Optional[str] = None,
+) -> None:
+    normalized_provider = (provider or "").strip().lower()
+    company_key = (provider_company_key or "").strip().lower() or _company_key_from_email(email)
+    if not normalized_provider or not company_key:
+        return
+
+    cur.execute(
+        """
+        SELECT id
+        FROM chat_groups
+        WHERE group_type = 'company'
+          AND sso_provider = %s
+          AND company_key = %s
+        LIMIT 1
+        """,
+        (normalized_provider, company_key),
+    )
+    row = cur.fetchone()
+    if row:
+        group_id = row["id"]
+    else:
+        group_id = uuid.uuid4()
+        group_name = f"Company: {company_key}"
+        cur.execute(
+            """
+            INSERT INTO chat_groups (id, name, created_by_user_id, group_type, company_key, sso_provider)
+            VALUES (%s, %s, %s, 'company', %s, %s)
+            """,
+            (group_id, group_name, user_id, company_key, normalized_provider),
+        )
+
+    cur.execute(
+        """
+        INSERT INTO group_members (group_id, user_id)
+        VALUES (%s, %s)
+        ON CONFLICT (group_id, user_id) DO NOTHING
+        """,
+        (group_id, user_id),
+    )
+
+
+def _normalize_company_key(raw: str) -> str:
+    value = (raw or "").strip().lower()
+    if "@" in value:
+        value = value.split("@", 1)[1]
+    value = re.sub(r"[^a-z0-9._-]", "", value)
+    return value[:160]
+
+
+def _load_oidc_providers() -> dict[str, dict[str, Any]]:
+    if not OIDC_PROVIDERS_JSON:
+        return {}
+    try:
+        parsed = json.loads(OIDC_PROVIDERS_JSON)
+    except Exception:
+        return {}
+    if not isinstance(parsed, dict):
+        return {}
+
+    providers: dict[str, dict[str, Any]] = {}
+    for raw_key, cfg in parsed.items():
+        key = _normalize_company_key(str(raw_key))
+        if not key or not isinstance(cfg, dict):
+            continue
+        issuer = str(cfg.get("issuer", "")).strip().rstrip("/")
+        client_id = str(cfg.get("client_id", "")).strip()
+        client_secret = str(cfg.get("client_secret", ""))
+        scope = str(cfg.get("scope", "openid profile email")).strip() or "openid profile email"
+        if not issuer or not client_id or not client_secret:
+            continue
+        providers[key] = {
+            "issuer": issuer,
+            "client_id": client_id,
+            "client_secret": client_secret,
+            "scope": scope,
+        }
+    return providers
+
+
+def _discover_oidc_endpoints(issuer: str) -> dict[str, str]:
+    url = f"{issuer.rstrip('/')}/.well-known/openid-configuration"
+    try:
+        res = requests.get(url, timeout=15)
+        res.raise_for_status()
+        payload = res.json()
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail="Failed to load OIDC discovery document") from exc
+
+    authorization_endpoint = payload.get("authorization_endpoint")
+    token_endpoint = payload.get("token_endpoint")
+    userinfo_endpoint = payload.get("userinfo_endpoint")
+    if not authorization_endpoint or not token_endpoint or not userinfo_endpoint:
+        raise HTTPException(status_code=502, detail="OIDC provider discovery is missing required endpoints")
+    return {
+        "authorization_endpoint": authorization_endpoint,
+        "token_endpoint": token_endpoint,
+        "userinfo_endpoint": userinfo_endpoint,
+    }
+
+
+def _pkce_challenge(verifier: str) -> str:
+    digest = hashlib.sha256(verifier.encode("utf-8")).digest()
+    return base64.urlsafe_b64encode(digest).decode("utf-8").rstrip("=")
+
+
+def _oauth_callback_base(request: Request) -> str:
+    if PUBLIC_API_BASE_URL:
+        return PUBLIC_API_BASE_URL
+    return str(request.base_url).rstrip("/")
+
+
 def _insert_security_event(
     cur: psycopg.Cursor,
     user_id: Optional[uuid.UUID],
@@ -580,9 +723,22 @@ def startup() -> None:
                     id UUID PRIMARY KEY,
                     name TEXT NOT NULL,
                     created_by_user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                    group_type TEXT NOT NULL DEFAULT 'custom',
+                    company_key TEXT,
+                    sso_provider TEXT,
                     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
                 )
                 """
+            )
+            cur.execute("ALTER TABLE chat_groups ADD COLUMN IF NOT EXISTS group_type TEXT NOT NULL DEFAULT 'custom'")
+            cur.execute("ALTER TABLE chat_groups ADD COLUMN IF NOT EXISTS company_key TEXT")
+            cur.execute("ALTER TABLE chat_groups ADD COLUMN IF NOT EXISTS sso_provider TEXT")
+            cur.execute("ALTER TABLE chat_groups DROP CONSTRAINT IF EXISTS chat_groups_group_type_check")
+            cur.execute(
+                "ALTER TABLE chat_groups ADD CONSTRAINT chat_groups_group_type_check CHECK (group_type IN ('custom', 'company'))"
+            )
+            cur.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_chat_groups_company_unique ON chat_groups (sso_provider, company_key) WHERE group_type = 'company'"
             )
             cur.execute(
                 """
@@ -689,9 +845,441 @@ def health() -> dict[str, Any]:
         "service": "api",
         "database_url_set": bool(DATABASE_URL),
         "google_client_id_set": bool(GOOGLE_CLIENT_ID),
+        "github_sso_configured": bool(GITHUB_CLIENT_ID and GITHUB_CLIENT_SECRET),
+        "oidc_provider_count": len(_load_oidc_providers()),
         "rbac_enabled": True,
         "smtp_configured": _smtp_is_configured(),
     }
+
+
+@app.get("/auth/sso/oidc/start")
+def auth_sso_oidc_start(
+    company: str,
+    request: Request,
+    intent: str = "login",
+    display_name: Optional[str] = None,
+) -> RedirectResponse:
+    intent_value = (intent or "login").strip().lower()
+    if intent_value not in {"login", "register"}:
+        raise HTTPException(status_code=400, detail="Invalid SSO intent")
+    signup_display_name = (display_name or "").strip()[:120]
+    if intent_value == "register" and not signup_display_name:
+        raise HTTPException(status_code=400, detail="Display name is required for SSO signup")
+
+    company_key = _normalize_company_key(company)
+    providers = _load_oidc_providers()
+    provider_key = company_key
+    config = providers.get(provider_key)
+    if not config and len(providers) == 1:
+        provider_key, config = next(iter(providers.items()))
+    if not config:
+        raise HTTPException(status_code=404, detail="No SSO provider configured for this company")
+
+    endpoints = _discover_oidc_endpoints(config["issuer"])
+    state = secrets.token_urlsafe(32)
+    verifier = secrets.token_urlsafe(64)
+    redirect_uri = f"{_oauth_callback_base(request)}/auth/sso/oidc/callback"
+    params = urlencode(
+        {
+            "response_type": "code",
+            "client_id": config["client_id"],
+            "redirect_uri": redirect_uri,
+            "scope": config["scope"],
+            "state": state,
+            "code_challenge": _pkce_challenge(verifier),
+            "code_challenge_method": "S256",
+        }
+    )
+    response = RedirectResponse(url=f"{endpoints['authorization_endpoint']}?{params}", status_code=302)
+    response.set_cookie(
+        key=SSO_STATE_COOKIE_NAME,
+        value=state,
+        httponly=True,
+        secure=COOKIE_SECURE,
+        samesite="lax",
+        max_age=10 * 60,
+        path="/",
+    )
+    response.set_cookie(
+        key=SSO_COMPANY_COOKIE_NAME,
+        value=company_key,
+        httponly=True,
+        secure=COOKIE_SECURE,
+        samesite="lax",
+        max_age=10 * 60,
+        path="/",
+    )
+    response.set_cookie(
+        key=SSO_PROVIDER_COOKIE_NAME,
+        value=provider_key,
+        httponly=True,
+        secure=COOKIE_SECURE,
+        samesite="lax",
+        max_age=10 * 60,
+        path="/",
+    )
+    response.set_cookie(
+        key=SSO_PKCE_COOKIE_NAME,
+        value=verifier,
+        httponly=True,
+        secure=COOKIE_SECURE,
+        samesite="lax",
+        max_age=10 * 60,
+        path="/",
+    )
+    response.set_cookie(
+        key=SSO_INTENT_COOKIE_NAME,
+        value=intent_value,
+        httponly=True,
+        secure=COOKIE_SECURE,
+        samesite="lax",
+        max_age=10 * 60,
+        path="/",
+    )
+    if intent_value == "register":
+        response.set_cookie(
+            key=SSO_DISPLAY_NAME_COOKIE_NAME,
+            value=signup_display_name,
+            httponly=True,
+            secure=COOKIE_SECURE,
+            samesite="lax",
+            max_age=10 * 60,
+            path="/",
+        )
+    return response
+
+
+@app.get("/auth/sso/oidc/callback")
+def auth_sso_oidc_callback(
+    code: str,
+    state: str,
+    request: Request,
+    sso_state: Optional[str] = Cookie(default=None, alias=SSO_STATE_COOKIE_NAME),
+    sso_company: Optional[str] = Cookie(default=None, alias=SSO_COMPANY_COOKIE_NAME),
+    sso_provider_key: Optional[str] = Cookie(default=None, alias=SSO_PROVIDER_COOKIE_NAME),
+    sso_pkce_verifier: Optional[str] = Cookie(default=None, alias=SSO_PKCE_COOKIE_NAME),
+    sso_intent: Optional[str] = Cookie(default=None, alias=SSO_INTENT_COOKIE_NAME),
+    sso_display_name: Optional[str] = Cookie(default=None, alias=SSO_DISPLAY_NAME_COOKIE_NAME),
+    user_agent: Optional[str] = Header(default=None),
+) -> RedirectResponse:
+    if not sso_state or not secrets.compare_digest(state, sso_state):
+        raise HTTPException(status_code=400, detail="Invalid SSO state")
+    if not sso_company or not sso_pkce_verifier:
+        raise HTTPException(status_code=400, detail="Missing SSO session context")
+
+    providers = _load_oidc_providers()
+    company_key = _normalize_company_key(sso_company)
+    provider_key = _normalize_company_key(sso_provider_key or sso_company)
+    config = providers.get(provider_key)
+    if not config:
+        raise HTTPException(status_code=404, detail="No SSO provider configured for this company")
+
+    endpoints = _discover_oidc_endpoints(config["issuer"])
+    redirect_uri = f"{_oauth_callback_base(request)}/auth/sso/oidc/callback"
+
+    try:
+        token_res = requests.post(
+            endpoints["token_endpoint"],
+            headers={"Accept": "application/json"},
+            data={
+                "grant_type": "authorization_code",
+                "code": code,
+                "redirect_uri": redirect_uri,
+                "client_id": config["client_id"],
+                "client_secret": config["client_secret"],
+                "code_verifier": sso_pkce_verifier,
+            },
+            timeout=20,
+        )
+        token_res.raise_for_status()
+        token_payload = token_res.json()
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail="Failed to exchange OIDC authorization code") from exc
+
+    access_token = token_payload.get("access_token")
+    if not access_token:
+        raise HTTPException(status_code=401, detail="Invalid OIDC token response")
+
+    try:
+        userinfo_res = requests.get(
+            endpoints["userinfo_endpoint"],
+            headers={
+                "Accept": "application/json",
+                "Authorization": f"Bearer {access_token}",
+            },
+            timeout=20,
+        )
+        userinfo_res.raise_for_status()
+        userinfo = userinfo_res.json()
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail="Failed to fetch OIDC user profile") from exc
+
+    email = _normalize_email(str(userinfo.get("email") or ""))
+    raw_email_verified = userinfo.get("email_verified", False)
+    email_verified = raw_email_verified is True or str(raw_email_verified).lower() == "true"
+    if not email:
+        raise HTTPException(status_code=401, detail="SSO account must provide an email")
+    if not email_verified:
+        raise HTTPException(status_code=401, detail="SSO email must be verified")
+
+    intent_value = (sso_intent or "login").strip().lower()
+    if intent_value not in {"login", "register"}:
+        raise HTTPException(status_code=400, detail="Invalid SSO intent")
+
+    provider_display_name = str(userinfo.get("name") or userinfo.get("preferred_username") or email).strip()[:120]
+    signup_display_name = (sso_display_name or "").strip()[:120]
+    chosen_display_name = signup_display_name if intent_value == "register" else provider_display_name
+    if intent_value == "register" and not chosen_display_name:
+        raise HTTPException(status_code=400, detail="Display name is required for SSO signup")
+
+    picture_url = userinfo.get("picture")
+    created_via_sso_signup = False
+
+    with _db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT id, is_banned FROM users WHERE email = %s", (email,))
+            existing = cur.fetchone()
+            if existing:
+                if existing.get("is_banned"):
+                    raise HTTPException(status_code=403, detail="Account is banned")
+                user_id = existing["id"]
+                cur.execute(
+                    """
+                    UPDATE users
+                    SET picture_url = %s, last_login_at = NOW(), email_verified = TRUE
+                    WHERE id = %s
+                    """,
+                    (picture_url, user_id),
+                )
+            else:
+                user_id = uuid.uuid4()
+                created_via_sso_signup = True
+                cur.execute(
+                    """
+                    INSERT INTO users (id, email, display_name, picture_url, last_login_at, email_verified)
+                    VALUES (%s, %s, %s, %s, NOW(), TRUE)
+                    """,
+                    (user_id, email, chosen_display_name, picture_url),
+                )
+                _insert_security_event(cur, user_id, "user_created", {"source": "oidc_sso", "company": company_key})
+
+            cur.execute(
+                """
+                INSERT INTO user_security_profiles (
+                    user_id, auth_provider, password_login_enabled, mfa_required, requirements_version
+                )
+                VALUES (%s, 'oidc', FALSE, FALSE, 'v1')
+                ON CONFLICT (user_id) DO UPDATE
+                SET auth_provider = CASE
+                    WHEN user_security_profiles.password_login_enabled THEN 'oidc+password'
+                    ELSE 'oidc'
+                END,
+                    updated_at = NOW()
+                """,
+                (user_id,),
+            )
+
+            if created_via_sso_signup:
+                _ensure_company_group_membership(
+                    cur,
+                    user_id,
+                    email,
+                    provider="oidc",
+                    provider_company_key=company_key,
+                )
+
+            raw_session_token = _create_session(
+                cur,
+                user_id,
+                user_agent,
+                _client_ip(request),
+            )
+            _insert_security_event(cur, user_id, "login_success", {"provider": "oidc", "company": company_key})
+        conn.commit()
+
+    redirect = RedirectResponse(url=WEB_ORIGIN, status_code=302)
+    _set_auth_cookie(redirect, raw_session_token)
+    redirect.delete_cookie(key=SSO_STATE_COOKIE_NAME, path="/")
+    redirect.delete_cookie(key=SSO_COMPANY_COOKIE_NAME, path="/")
+    redirect.delete_cookie(key=SSO_PROVIDER_COOKIE_NAME, path="/")
+    redirect.delete_cookie(key=SSO_PKCE_COOKIE_NAME, path="/")
+    redirect.delete_cookie(key=SSO_INTENT_COOKIE_NAME, path="/")
+    redirect.delete_cookie(key=SSO_DISPLAY_NAME_COOKIE_NAME, path="/")
+    return redirect
+
+
+@app.get("/auth/sso/github/start")
+def auth_sso_github_start(request: Request) -> RedirectResponse:
+    if not GITHUB_CLIENT_ID or not GITHUB_CLIENT_SECRET:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="GitHub SSO is not configured",
+        )
+
+    state = secrets.token_urlsafe(32)
+    redirect_uri = f"{_oauth_callback_base(request)}/auth/sso/github/callback"
+    params = urlencode(
+        {
+            "client_id": GITHUB_CLIENT_ID,
+            "redirect_uri": redirect_uri,
+            "scope": "read:user user:email",
+            "state": state,
+        }
+    )
+    response = RedirectResponse(url=f"https://github.com/login/oauth/authorize?{params}", status_code=302)
+    response.set_cookie(
+        key=SSO_STATE_COOKIE_NAME,
+        value=state,
+        httponly=True,
+        secure=COOKIE_SECURE,
+        samesite="lax",
+        max_age=10 * 60,
+        path="/",
+    )
+    return response
+
+
+@app.get("/auth/sso/github/callback")
+def auth_sso_github_callback(
+    code: str,
+    state: str,
+    request: Request,
+    sso_state: Optional[str] = Cookie(default=None, alias=SSO_STATE_COOKIE_NAME),
+    user_agent: Optional[str] = Header(default=None),
+) -> RedirectResponse:
+    if not GITHUB_CLIENT_ID or not GITHUB_CLIENT_SECRET:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="GitHub SSO is not configured",
+        )
+    if not sso_state or not secrets.compare_digest(state, sso_state):
+        raise HTTPException(status_code=400, detail="Invalid SSO state")
+
+    redirect_uri = f"{_oauth_callback_base(request)}/auth/sso/github/callback"
+    try:
+        token_res = requests.post(
+            "https://github.com/login/oauth/access_token",
+            headers={"Accept": "application/json"},
+            data={
+                "client_id": GITHUB_CLIENT_ID,
+                "client_secret": GITHUB_CLIENT_SECRET,
+                "code": code,
+                "redirect_uri": redirect_uri,
+                "state": state,
+            },
+            timeout=15,
+        )
+        token_res.raise_for_status()
+        token_payload = token_res.json()
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail="Failed to exchange GitHub OAuth code") from exc
+
+    access_token = token_payload.get("access_token")
+    if not access_token:
+        raise HTTPException(status_code=401, detail="Invalid GitHub OAuth response")
+
+    try:
+        profile_res = requests.get(
+            "https://api.github.com/user",
+            headers={
+                "Accept": "application/vnd.github+json",
+                "Authorization": f"Bearer {access_token}",
+            },
+            timeout=15,
+        )
+        profile_res.raise_for_status()
+        profile = profile_res.json()
+
+        emails_res = requests.get(
+            "https://api.github.com/user/emails",
+            headers={
+                "Accept": "application/vnd.github+json",
+                "Authorization": f"Bearer {access_token}",
+            },
+            timeout=15,
+        )
+        emails_res.raise_for_status()
+        emails_payload = emails_res.json()
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail="Failed to fetch GitHub profile") from exc
+
+    selected_email = None
+    if isinstance(emails_payload, list):
+        for item in emails_payload:
+            if item.get("primary") and item.get("verified") and item.get("email"):
+                selected_email = item["email"]
+                break
+        if not selected_email:
+            for item in emails_payload:
+                if item.get("verified") and item.get("email"):
+                    selected_email = item["email"]
+                    break
+
+    email = _normalize_email(selected_email or "")
+    if not email:
+        raise HTTPException(status_code=401, detail="GitHub account must expose a verified email")
+
+    display_name = (profile.get("name") or profile.get("login") or email).strip()[:120]
+    picture_url = profile.get("avatar_url")
+    created_via_sso_signup = False
+
+    with _db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT id, is_banned FROM users WHERE email = %s", (email,))
+            existing = cur.fetchone()
+
+            if existing:
+                if existing.get("is_banned"):
+                    raise HTTPException(status_code=403, detail="Account is banned")
+                user_id = existing["id"]
+                cur.execute(
+                    """
+                    UPDATE users
+                    SET display_name = %s, picture_url = %s, last_login_at = NOW(), email_verified = TRUE
+                    WHERE id = %s
+                    """,
+                    (display_name, picture_url, user_id),
+                )
+            else:
+                user_id = uuid.uuid4()
+                cur.execute(
+                    """
+                    INSERT INTO users (id, email, display_name, picture_url, last_login_at, email_verified)
+                    VALUES (%s, %s, %s, %s, NOW(), TRUE)
+                    """,
+                    (user_id, email, display_name, picture_url),
+                )
+                _insert_security_event(cur, user_id, "user_created", {"source": "github_sso"})
+
+            cur.execute(
+                """
+                INSERT INTO user_security_profiles (
+                    user_id, auth_provider, password_login_enabled, mfa_required, requirements_version
+                )
+                VALUES (%s, 'github', FALSE, FALSE, 'v1')
+                ON CONFLICT (user_id) DO UPDATE
+                SET auth_provider = CASE
+                    WHEN user_security_profiles.password_login_enabled THEN 'github+password'
+                    ELSE 'github'
+                END,
+                    updated_at = NOW()
+                """,
+                (user_id,),
+            )
+
+            raw_session_token = _create_session(
+                cur,
+                user_id,
+                user_agent,
+                _client_ip(request),
+            )
+            _insert_security_event(cur, user_id, "login_success", {"provider": "github"})
+        conn.commit()
+
+    redirect = RedirectResponse(url=WEB_ORIGIN, status_code=302)
+    _set_auth_cookie(redirect, raw_session_token)
+    redirect.delete_cookie(key=SSO_STATE_COOKIE_NAME, path="/")
+    return redirect
 
 
 @app.post("/auth/google")
@@ -718,7 +1306,15 @@ def auth_google(
 
     email = token_info.get("email")
     email_verified = bool(token_info.get("email_verified"))
-    display_name = token_info.get("name") or email
+    intent_value = (payload.intent or "login").strip().lower()
+    if intent_value not in {"login", "register"}:
+        raise HTTPException(status_code=400, detail="Invalid Google auth intent")
+
+    provider_display_name = (token_info.get("name") or email or "").strip()[:120]
+    chosen_display_name = (payload.display_name or "").strip()[:120] if intent_value == "register" else provider_display_name
+    if intent_value == "register" and not chosen_display_name:
+        raise HTTPException(status_code=400, detail="Display name is required for Google signup")
+
     picture_url = token_info.get("picture")
 
     if not email or not email_verified:
@@ -739,10 +1335,10 @@ def auth_google(
                 cur.execute(
                     """
                     UPDATE users
-                    SET display_name = %s, picture_url = %s, last_login_at = NOW(), email_verified = TRUE
+                    SET picture_url = %s, last_login_at = NOW(), email_verified = TRUE
                     WHERE id = %s
                     """,
-                    (display_name, picture_url, user_id),
+                    (picture_url, user_id),
                 )
             else:
                 new_user = True
@@ -752,7 +1348,7 @@ def auth_google(
                     INSERT INTO users (id, email, display_name, picture_url, last_login_at)
                     VALUES (%s, %s, %s, %s, NOW())
                     """,
-                    (user_id, email, display_name, picture_url),
+                    (user_id, email, chosen_display_name, picture_url),
                 )
                 cur.execute("UPDATE users SET email_verified = TRUE WHERE id = %s", (user_id,))
                 cur.execute(
@@ -1619,7 +2215,7 @@ def list_groups(
         with conn.cursor() as cur:
             cur.execute(
                 """
-                SELECT g.id, g.name, g.created_by_user_id, g.created_at
+                SELECT g.id, g.name, g.created_by_user_id, g.group_type, g.company_key, g.sso_provider, g.created_at
                 FROM group_members gm
                 JOIN chat_groups g ON g.id = gm.group_id
                 WHERE gm.user_id = %s
@@ -1634,11 +2230,44 @@ def list_groups(
                 "id": str(row["id"]),
                 "name": row["name"],
                 "created_by_user_id": str(row["created_by_user_id"]),
+                "group_type": row["group_type"],
+                "company_key": row["company_key"],
+                "sso_provider": row["sso_provider"],
                 "created_at": row["created_at"].isoformat(),
             }
             for row in rows
         ]
     }
+
+
+@app.delete("/groups/{group_id}/members/me")
+def leave_group(
+    group_id: str,
+    session_token: Optional[str] = Cookie(default=None, alias=SESSION_COOKIE_NAME),
+) -> dict[str, Any]:
+    user = _require_user(session_token)
+    try:
+        user_id = _to_uuid(user["id"])
+        safe_group_id = _to_uuid(group_id)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail="Invalid id") from exc
+
+    with _db() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                DELETE FROM group_members
+                WHERE group_id = %s AND user_id = %s
+                RETURNING group_id
+                """,
+                (safe_group_id, user_id),
+            )
+            deleted = cur.fetchone()
+            if not deleted:
+                raise HTTPException(status_code=404, detail="You are not a member of this group")
+        conn.commit()
+
+    return {"status": "ok"}
 
 
 @app.post("/groups/{group_id}/members")

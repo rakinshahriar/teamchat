@@ -3,6 +3,7 @@ const express = require('express');
 const app = express();
 const port = process.env.PORT || 3000;
 const googleClientId = process.env.GOOGLE_CLIENT_ID || '';
+const oidcProvidersJson = process.env.OIDC_PROVIDERS_JSON || '';
 const publicApiBase = process.env.PUBLIC_API_BASE_URL || '';
 
 app.use((req, res, next) => {
@@ -18,9 +19,10 @@ app.use(express.static('public'));
 
 app.get('/config.js', (_req, res) => {
   const safeClientId = JSON.stringify(googleClientId);
+  const safeOidcEnabled = JSON.stringify(Boolean(oidcProvidersJson.trim()));
   const safeApiBase = JSON.stringify(publicApiBase);
   res.type('application/javascript');
-  res.send(`window.APP_CONFIG = { googleClientId: ${safeClientId}, apiBase: ${safeApiBase} };`);
+  res.send(`window.APP_CONFIG = { googleClientId: ${safeClientId}, oidcSsoEnabled: ${safeOidcEnabled}, apiBase: ${safeApiBase} };`);
 });
 
 app.get('/health', (_req, res) => {

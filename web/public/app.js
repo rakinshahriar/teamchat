@@ -10,9 +10,21 @@ const manualLoginForm = document.getElementById('manualLoginForm');
 const registerName = document.getElementById('registerName');
 const registerEmail = document.getElementById('registerEmail');
 const registerPassword = document.getElementById('registerPassword');
+const registerTerms = document.getElementById('registerTerms');
+const termsDialog = document.getElementById('termsDialog');
+const termsOpenBtn = document.getElementById('termsOpenBtn');
+const termsCloseBtn = document.getElementById('termsCloseBtn');
+const companySsoDialog = document.getElementById('companySsoDialog');
+const companySsoForm = document.getElementById('companySsoForm');
+const companySsoDomainInput = document.getElementById('companySsoDomainInput');
+const companySsoCancelBtn = document.getElementById('companySsoCancelBtn');
 const loginEmail = document.getElementById('loginEmail');
 const loginPassword = document.getElementById('loginPassword');
 const authStack = document.getElementById('authStack');
+const portraitWelcomeText = document.getElementById('portraitWelcomeText');
+const authEyebrow = document.getElementById('authEyebrow');
+const authTitle = document.getElementById('authTitle');
+const authSubtitle = document.getElementById('authSubtitle');
 const adminLinkWrap = document.getElementById('adminLinkWrap');
 const connectionSearchForm = document.getElementById('connectionSearchForm');
 const connectionSearchInput = document.getElementById('connectionSearchInput');
@@ -32,6 +44,8 @@ const chatHint = document.getElementById('chatHint');
 const groupMemberSearchForm = document.getElementById('groupMemberSearchForm');
 const groupMemberSearchInput = document.getElementById('groupMemberSearchInput');
 const groupMemberSearchResults = document.getElementById('groupMemberSearchResults');
+const companySsoBtn = document.getElementById('companySsoBtn');
+const bodyEl = document.body;
 
 const computedApiBase = `${window.location.protocol}//${window.location.hostname}:8000`;
 const apiBase = window.APP_CONFIG?.apiBase || computedApiBase;
@@ -44,6 +58,62 @@ let allGroups = [];
 let selectedConnectionId = null;
 let selectedGroupId = null;
 let selectedChatType = null;
+let pendingSsoIntent = 'login';
+let pendingSsoDisplayName = '';
+const AUTH_MODE_STORAGE_KEY = 'teamchat_auth_mode';
+
+function setViewMode(isAuthView) {
+  if (!bodyEl) {
+    return;
+  }
+  bodyEl.classList.toggle('auth-view', isAuthView);
+  bodyEl.classList.toggle('app-view', !isAuthView);
+}
+
+function saveAuthMode(mode) {
+  try {
+    localStorage.setItem(AUTH_MODE_STORAGE_KEY, mode);
+  } catch {
+    // Ignore storage errors (private mode, restricted storage, etc.)
+  }
+}
+
+function getSavedAuthMode() {
+  try {
+    const mode = localStorage.getItem(AUTH_MODE_STORAGE_KEY);
+    return mode === 'register' ? 'register' : 'login';
+  } catch {
+    return 'login';
+  }
+}
+
+function isRegisterMode() {
+  return Boolean(authStack?.classList.contains('mode-register'));
+}
+
+function getSignupDisplayName() {
+  return (registerName?.value || '').trim();
+}
+
+function renderGoogleButtonForMode() {
+  if (!window.google?.accounts?.id) {
+    return;
+  }
+  const googleMount = document.getElementById('googleButton');
+  if (!googleMount) {
+    return;
+  }
+  googleMount.innerHTML = '';
+  const googleBtnWidth = Math.max(280, Math.floor(googleMount.clientWidth || 320));
+  window.google.accounts.id.renderButton(googleMount, {
+    type: 'standard',
+    theme: 'outline',
+    size: 'large',
+    text: isRegisterMode() ? 'continue_with' : 'signin_with',
+    shape: 'rectangular',
+    width: googleBtnWidth,
+  });
+}
 
 async function api(path, options = {}) {
   const res = await fetch(`${apiBase}${path}`, {
@@ -206,10 +276,14 @@ function renderGroups() {
   const rows = allGroups.map((group) => {
     const item = document.createElement('li');
     item.className = 'compact-item';
+    const controls = document.createElement('div');
+    controls.className = 'row';
+
     const btn = document.createElement('button');
     btn.type = 'button';
     btn.className = selectedChatType === 'group' && selectedGroupId === group.id ? 'active-connection' : 'ghost';
-    btn.textContent = group.name;
+    const companyLabel = group.group_type === 'company' ? ' (Company)' : '';
+    btn.textContent = `${group.name}${companyLabel}`;
     btn.addEventListener('click', async () => {
       selectedChatType = 'group';
       selectedGroupId = group.id;
@@ -227,7 +301,41 @@ function renderGroups() {
       renderGroups();
       await loadGroupMessages();
     });
-    item.appendChild(btn);
+
+    const leaveBtn = document.createElement('button');
+    leaveBtn.type = 'button';
+    leaveBtn.className = 'ghost';
+    leaveBtn.textContent = 'Leave';
+    leaveBtn.addEventListener('click', async () => {
+      const confirmed = window.confirm(`Leave group "${group.name}"?`);
+      if (!confirmed) {
+        return;
+      }
+      try {
+        await api(`/groups/${group.id}/members/me`, { method: 'DELETE' });
+        if (selectedChatType === 'group' && selectedGroupId === group.id) {
+          selectedGroupId = null;
+          selectedChatType = null;
+          activeConnectionName.textContent = 'Select a connection or group';
+          chatHint.textContent = 'You can only chat with accepted connections or group members.';
+          renderSimpleList(dmList, [], 'Choose a connection or group to start chatting.');
+          if (groupMemberSearchForm) {
+            groupMemberSearchForm.classList.add('hidden');
+          }
+          if (groupMemberSearchResults) {
+            groupMemberSearchResults.classList.add('hidden');
+            groupMemberSearchResults.innerHTML = '';
+          }
+        }
+        await loadGroups();
+      } catch (err) {
+        alert(String(err.message || err));
+      }
+    });
+
+    controls.appendChild(btn);
+    controls.appendChild(leaveBtn);
+    item.appendChild(controls);
     return item;
   });
   renderSimpleList(groupsList, rows, 'No groups yet.');
@@ -373,10 +481,26 @@ async function runGroupMemberSearch(event) {
 
 async function onGoogleCredential(response) {
   try {
+    const registerIntent = isRegisterMode();
+    const signupDisplayName = getSignupDisplayName();
+    if (registerIntent && !signupDisplayName) {
+      loginNotice.style.color = '#b42318';
+      loginNotice.textContent = 'Please enter a display name before continuing with Google signup.';
+      return;
+    }
+    if (registerIntent && registerTerms && !registerTerms.checked) {
+      loginNotice.style.color = '#b42318';
+      loginNotice.textContent = 'Please accept the Terms of Service before creating an account.';
+      return;
+    }
     loginNotice.textContent = '';
     await api('/auth/google', {
       method: 'POST',
-      body: JSON.stringify({ credential: response.credential }),
+      body: JSON.stringify({
+        credential: response.credential,
+        intent: registerIntent ? 'register' : 'login',
+        display_name: registerIntent ? signupDisplayName : undefined,
+      }),
     });
     await initSession();
   } catch (err) {
@@ -387,6 +511,11 @@ async function onGoogleCredential(response) {
 async function registerManual(event) {
   event.preventDefault();
   try {
+    if (registerTerms && !registerTerms.checked) {
+      loginNotice.style.color = '#b42318';
+      loginNotice.textContent = 'Please accept the Terms of Service before creating an account.';
+      return;
+    }
     loginNotice.textContent = '';
     const data = await api('/auth/register', {
       method: 'POST',
@@ -407,6 +536,18 @@ async function registerManual(event) {
     loginNotice.style.color = '#b42318';
     loginNotice.textContent = String(err.message || err);
   }
+}
+
+if (termsOpenBtn && termsDialog) {
+  termsOpenBtn.addEventListener('click', () => {
+    termsDialog.showModal();
+  });
+}
+
+if (termsCloseBtn && termsDialog) {
+  termsCloseBtn.addEventListener('click', () => {
+    termsDialog.close();
+  });
 }
 
 async function loginManual(event) {
@@ -441,6 +582,7 @@ async function initSession() {
     } else {
       adminLinkWrap.classList.add('hidden');
     }
+    setViewMode(false);
     authCard.classList.add('hidden');
     appCard.classList.remove('hidden');
     selectedChatType = null;
@@ -453,6 +595,7 @@ async function initSession() {
   } catch {
     currentUser = null;
     adminLinkWrap.classList.add('hidden');
+    setViewMode(true);
     authCard.classList.remove('hidden');
     appCard.classList.add('hidden');
   }
@@ -464,6 +607,23 @@ function showRegisterMode() {
   }
   authStack.classList.add('mode-register');
   authStack.classList.remove('mode-login');
+  saveAuthMode('register');
+  if (portraitWelcomeText) {
+    portraitWelcomeText.textContent = "Welcome to TeamChat, let's get you started.";
+  }
+  if (authEyebrow) {
+    authEyebrow.textContent = 'Create Account';
+  }
+  if (authTitle) {
+    authTitle.textContent = '';
+  }
+  if (authSubtitle) {
+    authSubtitle.textContent = 'Get started to experience search and connect, accept requests, private messaging, group chat.';
+  }
+  if (companySsoBtn) {
+    companySsoBtn.textContent = 'Continue with SSO';
+  }
+  renderGoogleButtonForMode();
 }
 
 function showLoginMode() {
@@ -472,6 +632,23 @@ function showLoginMode() {
   }
   authStack.classList.add('mode-login');
   authStack.classList.remove('mode-register');
+  saveAuthMode('login');
+  if (portraitWelcomeText) {
+    portraitWelcomeText.textContent = 'Welcome back to TeamChat';
+  }
+  if (authEyebrow) {
+    authEyebrow.textContent = 'Sign In';
+  }
+  if (authTitle) {
+    authTitle.textContent = '';
+  }
+  if (authSubtitle) {
+    authSubtitle.textContent = '';
+  }
+  if (companySsoBtn) {
+    companySsoBtn.textContent = 'Sign in with SSO';
+  }
+  renderGoogleButtonForMode();
 }
 
 if (dmForm) {
@@ -521,6 +698,7 @@ logoutBtn.addEventListener('click', async () => {
     await api('/logout', { method: 'POST' });
   } finally {
     adminLinkWrap.classList.add('hidden');
+    setViewMode(true);
     authCard.classList.remove('hidden');
     appCard.classList.add('hidden');
   }
@@ -584,7 +762,69 @@ if (authStack) {
   });
 }
 
+if (companySsoBtn) {
+  companySsoBtn.addEventListener('click', () => {
+    const registerIntent = isRegisterMode();
+    const signupDisplayName = getSignupDisplayName();
+    if (registerIntent && !signupDisplayName) {
+      loginNotice.style.color = '#b42318';
+      loginNotice.textContent = 'Please enter a display name before continuing with Company SSO signup.';
+      return;
+    }
+    if (registerIntent && registerTerms && !registerTerms.checked) {
+      loginNotice.style.color = '#b42318';
+      loginNotice.textContent = 'Please accept the Terms of Service before creating an account.';
+      return;
+    }
+
+    pendingSsoIntent = registerIntent ? 'register' : 'login';
+    pendingSsoDisplayName = registerIntent ? signupDisplayName : '';
+    if (!companySsoDialog || !companySsoDomainInput) {
+      return;
+    }
+
+    companySsoDomainInput.value = 'acme.com';
+    companySsoDialog.showModal();
+    companySsoDomainInput.focus();
+  });
+}
+
+if (companySsoCancelBtn && companySsoDialog) {
+  companySsoCancelBtn.addEventListener('click', () => {
+    companySsoDialog.close();
+  });
+}
+
+if (companySsoForm) {
+  companySsoForm.addEventListener('submit', (event) => {
+    event.preventDefault();
+    const company = (companySsoDomainInput?.value || '').trim();
+    if (!company) {
+      loginNotice.style.color = '#b42318';
+      loginNotice.textContent = 'Company domain or name is required for Company SSO.';
+      return;
+    }
+
+    companySsoDialog?.close();
+    const params = new URLSearchParams({
+      company,
+      intent: pendingSsoIntent,
+    });
+    if (pendingSsoIntent === 'register' && pendingSsoDisplayName) {
+      params.set('display_name', pendingSsoDisplayName);
+    }
+    const startUrl = `${apiBase}/auth/sso/oidc/start?${params.toString()}`;
+    window.location.assign(startUrl);
+  });
+}
+
 window.addEventListener('load', async () => {
+  setViewMode(true);
+  if (getSavedAuthMode() === 'register') {
+    showRegisterMode();
+  } else {
+    showLoginMode();
+  }
   const clientId = window.APP_CONFIG?.googleClientId || '';
   if (!clientId) {
     loginNotice.textContent = 'Google login is not configured. Add GOOGLE_CLIENT_ID in .env.';
@@ -593,13 +833,7 @@ window.addEventListener('load', async () => {
       client_id: clientId,
       callback: onGoogleCredential,
     });
-    window.google.accounts.id.renderButton(document.getElementById('googleButton'), {
-      type: 'standard',
-      theme: 'outline',
-      size: 'large',
-      text: 'signin_with',
-      shape: 'pill',
-    });
+    renderGoogleButtonForMode();
   }
 
   await initSession();
