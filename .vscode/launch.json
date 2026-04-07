@@ -1,0 +1,42 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "API: FastAPI (local)",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "uvicorn",
+      "args": [
+        "main:app",
+        "--host",
+        "0.0.0.0",
+        "--port",
+        "8000",
+        "--reload"
+      ],
+      "cwd": "${workspaceFolder}/api",
+      "console": "integratedTerminal"
+    },
+    {
+      "name": "Web: Node (local)",
+      "type": "node",
+      "request": "launch",
+      "program": "${workspaceFolder}/web/server.js",
+      "cwd": "${workspaceFolder}/web",
+      "env": {
+        "PORT": "3000",
+        "API_BASE_URL": "http://localhost:8000"
+      },
+      "console": "integratedTerminal"
+    }
+  ],
+  "compounds": [
+    {
+      "name": "API + Web (local)",
+      "configurations": [
+        "API: FastAPI (local)",
+        "Web: Node (local)"
+      ]
+    }
+  ]
+}

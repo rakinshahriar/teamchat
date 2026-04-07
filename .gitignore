@@ -1,0 +1,24 @@
+.DS_Store
+.env
+.env.*
+!.env.example
+
+# Local secrets/keys
+*.pem
+*.key
+*.p12
+*.pfx
+*.p8
+*.crt
+*.cer
+id_rsa
+id_ed25519
+*secret*
+*credentials*
+
+# Local env backups
+*.env.bak
+*.env.local
+
+# VS Code local logs/state
+.vscode/*.log

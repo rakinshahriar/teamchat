@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Create Account | FrontEnd OAuth Database</title>
+    <link rel="stylesheet" href="/app.css?v=20260407-2" />
+    <script src="/config.js?v=20260407-2" defer></script>
+    <script src="/register.js?v=20260407-2" defer></script>
+  </head>
+  <body>
+    <main class="shell">
+      <section class="auth-layout">
+        <aside class="auth-side">
+          <div class="brand">FOD</div>
+          <h1>Create your FrontEnd OAuth Database account</h1>
+          <p class="sub">Register once, verify your email, then sign in to your private message vault.</p>
+        </aside>
+
+        <div class="card auth-main">
+          <p class="eyebrow">Create Account</p>
+          <h2>Set up your profile</h2>
+          <p class="sub">Use a strong password with upper, lower, number, and symbol.</p>
+
+          <div id="registerNotice" class="notice"></div>
+
+          <form id="registerForm" class="auth-form primary-login">
+            <input id="registerName" type="text" placeholder="Display name" maxlength="120" />
+            <input id="registerEmail" type="email" placeholder="Email address" required />
+            <input id="registerPassword" type="password" placeholder="Password" minlength="10" required />
+            <small>Password needs upper, lower, number, and symbol.</small>
+            <button type="submit">Create Account</button>
+          </form>
+
+          <div class="auth-links">
+            <a href="/">Back to login</a>
+          </div>
+        </div>
+      </section>
+    </main>
+  </body>
+</html>

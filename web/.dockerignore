@@ -1,0 +1,16 @@
+node_modules/
+npm-debug.log
+.env
+.env.*
+*.pem
+*.key
+*.p12
+*.pfx
+*.p8
+*.crt
+*.cer
+id_rsa
+id_ed25519
+*secret*
+*credentials*
+*.log

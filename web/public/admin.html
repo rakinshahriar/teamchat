@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Admin Dashboard</title>
+    <link rel="stylesheet" href="/app.css?v=20260407-9" />
+    <script src="/config.js?v=20260407-9" defer></script>
+    <script src="/admin.js?v=20260407-9" defer></script>
+  </head>
+  <body>
+    <main class="shell">
+      <section class="card">
+        <h1>Admin Dashboard</h1>
+        <p class="sub">Expandable rank tree from Rank 7 (top) to Rank 1 (bottom).</p>
+        <button id="refreshBtn">Refresh</button>
+        <div id="adminStatus" class="notice"></div>
+
+        <div class="admin-grid">
+          <details class="rank-panel" id="rankPanelTile">
+            <summary>Rank Tree</summary>
+            <input id="userSearch" type="text" placeholder="Search by email or name..." />
+            <div id="rankTree" class="rank-tree"></div>
+          </details>
+          <details class="banned-panel" id="bannedPanelTile">
+            <summary>Banned Users</summary>
+            <div id="bannedList" class="banned-list"></div>
+          </details>
+        </div>
+        <div id="actionStatus" class="notice"></div>
+
+        <details class="security-tile" id="securityPanelTile">
+          <summary>Security Events</summary>
+          <pre id="eventsDump"></pre>
+        </details>
+
+        <p><a href="/">Back to app</a></p>
+      </section>
+    </main>
+  </body>
+</html>

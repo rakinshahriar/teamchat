@@ -1,0 +1,114 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>FrontEnd OAuth Database</title>
+    <link rel="stylesheet" href="/app.css?v=20260407-6" />
+    <script src="https://accounts.google.com/gsi/client" async defer></script>
+    <script src="/config.js?v=20260407-6" defer></script>
+    <script src="/app.js?v=20260407-6" defer></script>
+  </head>
+  <body>
+    <main class="shell">
+      <section class="auth-layout" id="authCard">
+        <aside class="auth-side">
+          <div class="brand">FOD</div>
+          <h1>Welcome to FrontEnd OAuth Database</h1>
+          <p class="sub">Secure sign-in for your message vault and team administration.</p>
+          <ul class="feature-list">
+            <li>Email verification and password reset</li>
+            <li>Role-based admin controls</li>
+            <li>Private message history per account</li>
+          </ul>
+        </aside>
+
+        <div class="card auth-main">
+          <p class="eyebrow">Sign In</p>
+          <h2>Access your account</h2>
+          <p class="sub">Use Google for one-click sign in, or continue with email and password.</p>
+
+          <div id="loginNotice" class="notice status-muted" role="status" aria-live="polite"></div>
+
+          <div id="authStack" class="auth-stack mode-login">
+            <section id="loginTile" class="auth-tile">
+              <h3>Login</h3>
+              <div class="tile-form">
+                <form id="manualLoginForm" class="auth-form primary-login">
+                  <input id="loginEmail" type="email" placeholder="Email address" required />
+                  <input id="loginPassword" type="password" placeholder="Password" required />
+                  <button type="submit">Login</button>
+                </form>
+              </div>
+              <button data-auth-switch="register" class="toggle-link" type="button">Create account</button>
+            </section>
+
+            <section id="registerTile" class="auth-tile">
+              <h3>Create Account</h3>
+              <div class="tile-form">
+                <form id="registerForm" class="auth-form primary-login">
+                  <input id="registerName" type="text" placeholder="Display name" maxlength="120" />
+                  <input id="registerEmail" type="email" placeholder="Email address" required />
+                  <input id="registerPassword" type="password" placeholder="Password" minlength="10" required />
+                  <small>Password needs upper, lower, number, and symbol.</small>
+                  <button type="submit">Register</button>
+                </form>
+                <button data-auth-switch="login" class="toggle-link" type="button">Back to login</button>
+              </div>
+            </section>
+          </div>
+
+          <div class="auth-divider">or continue with Google</div>
+
+          <div class="google-wrap">
+            <div id="googleButton"></div>
+          </div>
+
+          <div class="auth-links">
+            <a href="/reset-password.html">Reset password</a>
+          </div>
+        </div>
+      </section>
+
+      <section class="card hidden" id="appCard">
+        <header class="row spread">
+          <div class="row">
+            <img id="avatar" class="avatar" alt="avatar" />
+            <div>
+              <h2 id="displayName">User</h2>
+              <p id="email" class="sub"></p>
+            </div>
+          </div>
+          <div class="row header-actions">
+            <div id="adminLinkWrap" class="hidden">
+              <a class="ghost admin-link-btn" href="/admin.html">Admin</a>
+            </div>
+            <button id="logoutBtn" class="ghost" type="button">Logout</button>
+          </div>
+        </header>
+
+        <div class="stats-strip">
+          <div class="stat">
+            <small>Total messages</small>
+            <strong id="messageCount">0</strong>
+          </div>
+          <div class="stat">
+            <small>Latest activity</small>
+            <strong id="latestMessageAt">-</strong>
+          </div>
+        </div>
+
+        <form id="messageForm" class="message-form">
+          <textarea id="messageInput" placeholder="Write a message..." maxlength="2000" required></textarea>
+          <div class="row spread">
+            <small id="messageHint">Your message is stored under your account.</small>
+            <button type="submit">Save Message</button>
+          </div>
+          <small id="charCount" class="char-count">0 / 2000</small>
+        </form>
+        <h3>Past Messages</h3>
+        <ul id="messageList" class="message-list"></ul>
+      </section>
+    </main>
+  </body>
+</html>

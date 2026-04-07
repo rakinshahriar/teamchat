@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Verify Email</title>
+    <link rel="stylesheet" href="/app.css?v=20260407-2" />
+    <script src="/config.js?v=20260407-2" defer></script>
+    <script src="/verify.js?v=20260407-2" defer></script>
+  </head>
+  <body>
+    <main class="shell">
+      <section class="card">
+        <h1>Email Verification</h1>
+        <p class="sub">Paste the verification token from your registration response.</p>
+        <form id="verifyForm" class="auth-form">
+          <input id="verifyToken" type="text" placeholder="Verification token" required />
+          <button type="submit">Verify Email</button>
+        </form>
+        <div id="verifyStatus" class="notice"></div>
+        <p><a href="/">Back to login</a></p>
+      </section>
+    </main>
+  </body>
+</html>
