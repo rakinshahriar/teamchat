@@ -59,6 +59,35 @@ app.add_middleware(
 )
 
 
+def _is_local_host(host: str) -> bool:
+    host_only = (host or "").split(":", 1)[0].strip().lower()
+    return host_only in {"localhost", "127.0.0.1", "::1", "api", "web", "db"}
+
+
+@app.middleware("http")
+async def enforce_https_and_headers(request: Request, call_next):
+    forwarded_proto = request.headers.get("x-forwarded-proto", "").split(",", 1)[0].strip().lower()
+    forwarded_host = request.headers.get("x-forwarded-host", "").split(",", 1)[0].strip()
+    host = forwarded_host or request.headers.get("host", "").split(",", 1)[0].strip()
+
+    if forwarded_proto == "http" and host and not _is_local_host(host):
+        target = f"https://{host}{request.url.path}"
+        if request.url.query:
+            target = f"{target}?{request.url.query}"
+        return RedirectResponse(url=target, status_code=308)
+
+    response = await call_next(request)
+
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+    response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
+    if forwarded_proto == "https":
+        response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
+
+    return response
+
+
 class GoogleAuthRequest(BaseModel):
     credential: str = Field(min_length=20)
     intent: str = Field(default="login", pattern="^(login|register)$")

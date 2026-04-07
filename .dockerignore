@@ -1,0 +1,32 @@
+# Docker ignore for build context
+# Ignore local env files
+.env
+.env.*
+
+# Node and build artifacts
+node_modules
+dist
+build
+
+# Python cache
+__pycache__
+*.pyc
+
+# Private keys and certs
+*.pem
+*.key
+*.p12
+*.pfx
+*.p8
+*.crt
+*.cer
+id_rsa
+id_ed25519
+
+# Git and editor config
+.git
+.vscode
+.DS_Store
+
+# Logs
+*.log
