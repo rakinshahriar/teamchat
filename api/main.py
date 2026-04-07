@@ -1496,7 +1496,10 @@ def auth_register(
         conn.commit()
 
     if verification_link:
-        _send_verification_email(email, verification_link)
+        try:
+            _send_verification_email(email, verification_link)
+        except Exception:
+            pass  # Email delivery failure is non-fatal; user can resend from login page
 
     return {"status": "ok", "new_user": new_user, "verification_required": True}
 
@@ -1646,7 +1649,10 @@ def auth_resend_verification(payload: VerificationRequest) -> dict[str, Any]:
             _insert_security_event(cur, row["id"], "email_verification_sent", {"channel": "app_link"})
         conn.commit()
 
-    _send_verification_email(email, verification_link)
+    try:
+        _send_verification_email(email, verification_link)
+    except Exception:
+        pass  # Non-fatal; token is saved, user can retry
     return {"status": "ok"}
 
 
@@ -1674,7 +1680,10 @@ def auth_password_reset_request(payload: VerificationRequest) -> dict[str, Any]:
             _insert_security_event(cur, row["id"], "password_reset_requested", {"channel": "app_link"})
         conn.commit()
 
-    _send_reset_email(email, reset_link)
+    try:
+        _send_reset_email(email, reset_link)
+    except Exception:
+        pass  # Non-fatal; token is saved, client should display the link or prompt retry
     return {"status": "ok"}
 
 
