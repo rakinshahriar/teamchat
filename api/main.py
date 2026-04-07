@@ -77,6 +77,31 @@ class MessageCreateRequest(BaseModel):
     content: str = Field(min_length=1, max_length=2000)
 
 
+class ConnectionRequestCreateRequest(BaseModel):
+    target_user_id: str = Field(min_length=10, max_length=100)
+
+
+class ConnectionRequestActionRequest(BaseModel):
+    requester_user_id: str = Field(min_length=10, max_length=100)
+
+
+class ConnectionMessageCreateRequest(BaseModel):
+    recipient_user_id: str = Field(min_length=10, max_length=100)
+    content: str = Field(min_length=1, max_length=2000)
+
+
+class GroupCreateRequest(BaseModel):
+    name: str = Field(min_length=2, max_length=80)
+
+
+class GroupAddMemberRequest(BaseModel):
+    user_id: str = Field(min_length=10, max_length=100)
+
+
+class GroupMessageCreateRequest(BaseModel):
+    content: str = Field(min_length=1, max_length=2000)
+
+
 class RankUpdateRequest(BaseModel):
     user_id: str = Field(min_length=10, max_length=100)
     rank: int = Field(ge=1, le=7)
@@ -258,6 +283,38 @@ def _legacy_role_from_rank(rank: int) -> str:
     if rank >= ADMIN_MIN_RANK:
         return "admin"
     return "user"
+
+
+def _connection_pair(user_a: uuid.UUID, user_b: uuid.UUID) -> tuple[uuid.UUID, uuid.UUID]:
+    if str(user_a) < str(user_b):
+        return user_a, user_b
+    return user_b, user_a
+
+
+def _are_connected(cur: psycopg.Cursor, user_a: uuid.UUID, user_b: uuid.UUID) -> bool:
+    low_id, high_id = _connection_pair(user_a, user_b)
+    cur.execute(
+        """
+        SELECT 1
+        FROM connections
+        WHERE user_low_id = %s AND user_high_id = %s
+        """,
+        (low_id, high_id),
+    )
+    return cur.fetchone() is not None
+
+
+def _require_group_member(cur: psycopg.Cursor, group_id: uuid.UUID, user_id: uuid.UUID) -> None:
+    cur.execute(
+        """
+        SELECT 1
+        FROM group_members
+        WHERE group_id = %s AND user_id = %s
+        """,
+        (group_id, user_id),
+    )
+    if not cur.fetchone():
+        raise HTTPException(status_code=403, detail="You must be a group member")
 
 
 def _insert_security_event(
@@ -473,6 +530,83 @@ def startup() -> None:
                     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
                 )
                 """
+            )
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS connection_requests (
+                    id UUID PRIMARY KEY,
+                    requester_user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                    recipient_user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                    status TEXT NOT NULL DEFAULT 'pending',
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    responded_at TIMESTAMPTZ,
+                    UNIQUE (requester_user_id, recipient_user_id)
+                )
+                """
+            )
+            cur.execute(
+                "ALTER TABLE connection_requests DROP CONSTRAINT IF EXISTS connection_requests_status_check"
+            )
+            cur.execute(
+                "ALTER TABLE connection_requests ADD CONSTRAINT connection_requests_status_check CHECK (status IN ('pending', 'accepted', 'declined'))"
+            )
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS connections (
+                    user_low_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                    user_high_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    PRIMARY KEY (user_low_id, user_high_id)
+                )
+                """
+            )
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS direct_messages (
+                    id BIGSERIAL PRIMARY KEY,
+                    sender_user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                    recipient_user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                    content TEXT NOT NULL,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                )
+                """
+            )
+            cur.execute(
+                "CREATE INDEX IF NOT EXISTS idx_direct_messages_pair_time ON direct_messages (sender_user_id, recipient_user_id, created_at DESC)"
+            )
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS chat_groups (
+                    id UUID PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    created_by_user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                )
+                """
+            )
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS group_members (
+                    group_id UUID NOT NULL REFERENCES chat_groups(id) ON DELETE CASCADE,
+                    user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                    joined_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    PRIMARY KEY (group_id, user_id)
+                )
+                """
+            )
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS group_messages (
+                    id BIGSERIAL PRIMARY KEY,
+                    group_id UUID NOT NULL REFERENCES chat_groups(id) ON DELETE CASCADE,
+                    sender_user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                    content TEXT NOT NULL,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                )
+                """
+            )
+            cur.execute(
+                "CREATE INDEX IF NOT EXISTS idx_group_messages_group_time ON group_messages (group_id, created_at DESC)"
             )
             cur.execute(
                 """
@@ -1039,6 +1173,592 @@ def create_message(
         conn.commit()
     return {
         "id": row["id"],
+        "content": row["content"],
+        "created_at": row["created_at"].isoformat(),
+    }
+
+
+@app.get("/users/search")
+def search_users(
+    q: str,
+    limit: int = 20,
+    session_token: Optional[str] = Cookie(default=None, alias=SESSION_COOKIE_NAME),
+) -> dict[str, Any]:
+    user = _require_user(session_token)
+    query = (q or "").strip().lower()
+    if len(query) < 2:
+        return {"users": []}
+    safe_limit = max(1, min(limit, 50))
+    pattern = f"%{query}%"
+    with _db() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT id, email, display_name, picture_url
+                FROM users
+                WHERE id <> %s
+                  AND is_banned = FALSE
+                  AND (
+                    LOWER(email) LIKE %s
+                    OR LOWER(display_name) LIKE %s
+                  )
+                ORDER BY display_name ASC, email ASC
+                LIMIT %s
+                """,
+                (user["id"], pattern, pattern, safe_limit),
+            )
+            rows = cur.fetchall()
+    return {
+        "users": [
+            {
+                "id": str(row["id"]),
+                "email": row["email"],
+                "display_name": row["display_name"],
+                "picture_url": row["picture_url"],
+            }
+            for row in rows
+        ]
+    }
+
+
+@app.post("/connections/request")
+def create_connection_request(
+    payload: ConnectionRequestCreateRequest,
+    session_token: Optional[str] = Cookie(default=None, alias=SESSION_COOKIE_NAME),
+) -> dict[str, Any]:
+    user = _require_user(session_token)
+    try:
+        requester_id = _to_uuid(user["id"])
+        target_id = _to_uuid(payload.target_user_id)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail="Invalid user_id") from exc
+
+    if requester_id == target_id:
+        raise HTTPException(status_code=400, detail="You cannot connect with yourself")
+
+    with _db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT id, is_banned FROM users WHERE id = %s", (target_id,))
+            target = cur.fetchone()
+            if not target:
+                raise HTTPException(status_code=404, detail="User not found")
+            if target.get("is_banned"):
+                raise HTTPException(status_code=400, detail="Cannot connect with banned user")
+
+            if _are_connected(cur, requester_id, target_id):
+                return {"status": "ok", "already_connected": True}
+
+            cur.execute(
+                """
+                SELECT id, requester_user_id, recipient_user_id, status
+                FROM connection_requests
+                WHERE (
+                    requester_user_id = %s AND recipient_user_id = %s
+                ) OR (
+                    requester_user_id = %s AND recipient_user_id = %s
+                )
+                ORDER BY created_at DESC
+                LIMIT 1
+                """,
+                (requester_id, target_id, target_id, requester_id),
+            )
+            existing = cur.fetchone()
+            if existing and existing["status"] == "pending":
+                return {
+                    "status": "ok",
+                    "pending": True,
+                    "direction": (
+                        "outgoing"
+                        if str(existing["requester_user_id"]) == str(requester_id)
+                        else "incoming"
+                    ),
+                }
+
+            cur.execute(
+                """
+                INSERT INTO connection_requests (id, requester_user_id, recipient_user_id, status, responded_at)
+                VALUES (%s, %s, %s, 'pending', NULL)
+                ON CONFLICT (requester_user_id, recipient_user_id) DO UPDATE
+                SET status = 'pending',
+                    responded_at = NULL,
+                    created_at = NOW()
+                """,
+                (uuid.uuid4(), requester_id, target_id),
+            )
+        conn.commit()
+    return {"status": "ok", "pending": True}
+
+
+@app.get("/connections/requests")
+def list_connection_requests(
+    session_token: Optional[str] = Cookie(default=None, alias=SESSION_COOKIE_NAME),
+) -> dict[str, Any]:
+    user = _require_user(session_token)
+    with _db() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT cr.requester_user_id, u.display_name, u.email, u.picture_url, cr.created_at
+                FROM connection_requests cr
+                JOIN users u ON u.id = cr.requester_user_id
+                WHERE cr.recipient_user_id = %s
+                  AND cr.status = 'pending'
+                ORDER BY cr.created_at DESC
+                LIMIT 100
+                """,
+                (user["id"],),
+            )
+            incoming_rows = cur.fetchall()
+
+            cur.execute(
+                """
+                SELECT cr.recipient_user_id, u.display_name, u.email, u.picture_url, cr.created_at
+                FROM connection_requests cr
+                JOIN users u ON u.id = cr.recipient_user_id
+                WHERE cr.requester_user_id = %s
+                  AND cr.status = 'pending'
+                ORDER BY cr.created_at DESC
+                LIMIT 100
+                """,
+                (user["id"],),
+            )
+            outgoing_rows = cur.fetchall()
+
+    return {
+        "incoming": [
+            {
+                "user_id": str(row["requester_user_id"]),
+                "display_name": row["display_name"],
+                "email": row["email"],
+                "picture_url": row["picture_url"],
+                "created_at": row["created_at"].isoformat(),
+            }
+            for row in incoming_rows
+        ],
+        "outgoing": [
+            {
+                "user_id": str(row["recipient_user_id"]),
+                "display_name": row["display_name"],
+                "email": row["email"],
+                "picture_url": row["picture_url"],
+                "created_at": row["created_at"].isoformat(),
+            }
+            for row in outgoing_rows
+        ],
+    }
+
+
+@app.post("/connections/requests/accept")
+def accept_connection_request(
+    payload: ConnectionRequestActionRequest,
+    session_token: Optional[str] = Cookie(default=None, alias=SESSION_COOKIE_NAME),
+) -> dict[str, Any]:
+    user = _require_user(session_token)
+    try:
+        recipient_id = _to_uuid(user["id"])
+        requester_id = _to_uuid(payload.requester_user_id)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail="Invalid user_id") from exc
+
+    if recipient_id == requester_id:
+        raise HTTPException(status_code=400, detail="Invalid requester")
+
+    low_id, high_id = _connection_pair(recipient_id, requester_id)
+    with _db() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT id
+                FROM connection_requests
+                WHERE requester_user_id = %s
+                  AND recipient_user_id = %s
+                  AND status = 'pending'
+                """,
+                (requester_id, recipient_id),
+            )
+            pending = cur.fetchone()
+            if not pending:
+                raise HTTPException(status_code=404, detail="Pending request not found")
+
+            cur.execute(
+                """
+                UPDATE connection_requests
+                SET status = 'accepted', responded_at = NOW()
+                WHERE requester_user_id = %s
+                  AND recipient_user_id = %s
+                  AND status = 'pending'
+                """,
+                (requester_id, recipient_id),
+            )
+            cur.execute(
+                """
+                INSERT INTO connections (user_low_id, user_high_id)
+                VALUES (%s, %s)
+                ON CONFLICT (user_low_id, user_high_id) DO NOTHING
+                """,
+                (low_id, high_id),
+            )
+        conn.commit()
+    return {"status": "ok", "connected": True}
+
+
+@app.post("/connections/requests/decline")
+def decline_connection_request(
+    payload: ConnectionRequestActionRequest,
+    session_token: Optional[str] = Cookie(default=None, alias=SESSION_COOKIE_NAME),
+) -> dict[str, Any]:
+    user = _require_user(session_token)
+    try:
+        recipient_id = _to_uuid(user["id"])
+        requester_id = _to_uuid(payload.requester_user_id)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail="Invalid user_id") from exc
+
+    with _db() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE connection_requests
+                SET status = 'declined', responded_at = NOW()
+                WHERE requester_user_id = %s
+                  AND recipient_user_id = %s
+                  AND status = 'pending'
+                """,
+                (requester_id, recipient_id),
+            )
+        conn.commit()
+    return {"status": "ok"}
+
+
+@app.get("/connections")
+def list_connections(
+    session_token: Optional[str] = Cookie(default=None, alias=SESSION_COOKIE_NAME),
+) -> dict[str, Any]:
+    user = _require_user(session_token)
+    user_id = _to_uuid(user["id"])
+    with _db() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT
+                    CASE
+                        WHEN c.user_low_id = %s THEN c.user_high_id
+                        ELSE c.user_low_id
+                    END AS connection_user_id,
+                    c.created_at
+                FROM connections c
+                WHERE c.user_low_id = %s OR c.user_high_id = %s
+                ORDER BY c.created_at DESC
+                """,
+                (user_id, user_id, user_id),
+            )
+            raw_connections = cur.fetchall()
+            connection_ids = [row["connection_user_id"] for row in raw_connections]
+            if not connection_ids:
+                return {"connections": []}
+
+            cur.execute(
+                """
+                SELECT id, display_name, email, picture_url, is_banned
+                FROM users
+                WHERE id = ANY(%s)
+                """,
+                (connection_ids,),
+            )
+            profile_rows = cur.fetchall()
+
+    profile_map = {str(row["id"]): row for row in profile_rows if not row.get("is_banned")}
+    return {
+        "connections": [
+            {
+                "user_id": str(row["connection_user_id"]),
+                "display_name": profile_map[str(row["connection_user_id"])]["display_name"],
+                "email": profile_map[str(row["connection_user_id"])]["email"],
+                "picture_url": profile_map[str(row["connection_user_id"])]["picture_url"],
+                "connected_at": row["created_at"].isoformat(),
+            }
+            for row in raw_connections
+            if str(row["connection_user_id"]) in profile_map
+        ]
+    }
+
+
+@app.get("/connections/messages/{other_user_id}")
+def list_connection_messages(
+    other_user_id: str,
+    session_token: Optional[str] = Cookie(default=None, alias=SESSION_COOKIE_NAME),
+) -> dict[str, Any]:
+    user = _require_user(session_token)
+    try:
+        user_id = _to_uuid(user["id"])
+        peer_id = _to_uuid(other_user_id)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail="Invalid user_id") from exc
+
+    with _db() as conn:
+        with conn.cursor() as cur:
+            if not _are_connected(cur, user_id, peer_id):
+                raise HTTPException(status_code=403, detail="You can only message accepted connections")
+            cur.execute(
+                """
+                SELECT id, sender_user_id, recipient_user_id, content, created_at
+                FROM direct_messages
+                WHERE (
+                    sender_user_id = %s AND recipient_user_id = %s
+                ) OR (
+                    sender_user_id = %s AND recipient_user_id = %s
+                )
+                ORDER BY created_at DESC
+                LIMIT 200
+                """,
+                (user_id, peer_id, peer_id, user_id),
+            )
+            rows = cur.fetchall()
+
+    rows.reverse()
+    return {
+        "messages": [
+            {
+                "id": row["id"],
+                "sender_user_id": str(row["sender_user_id"]),
+                "recipient_user_id": str(row["recipient_user_id"]),
+                "content": row["content"],
+                "created_at": row["created_at"].isoformat(),
+            }
+            for row in rows
+        ]
+    }
+
+
+@app.post("/connections/messages")
+def create_connection_message(
+    payload: ConnectionMessageCreateRequest,
+    session_token: Optional[str] = Cookie(default=None, alias=SESSION_COOKIE_NAME),
+) -> dict[str, Any]:
+    user = _require_user(session_token)
+    try:
+        sender_id = _to_uuid(user["id"])
+        recipient_id = _to_uuid(payload.recipient_user_id)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail="Invalid user_id") from exc
+
+    if sender_id == recipient_id:
+        raise HTTPException(status_code=400, detail="Cannot send message to yourself")
+
+    with _db() as conn:
+        with conn.cursor() as cur:
+            if not _are_connected(cur, sender_id, recipient_id):
+                raise HTTPException(status_code=403, detail="You can only message accepted connections")
+            cur.execute(
+                """
+                INSERT INTO direct_messages (sender_user_id, recipient_user_id, content)
+                VALUES (%s, %s, %s)
+                RETURNING id, sender_user_id, recipient_user_id, content, created_at
+                """,
+                (sender_id, recipient_id, payload.content.strip()),
+            )
+            row = cur.fetchone()
+        conn.commit()
+
+    return {
+        "id": row["id"],
+        "sender_user_id": str(row["sender_user_id"]),
+        "recipient_user_id": str(row["recipient_user_id"]),
+        "content": row["content"],
+        "created_at": row["created_at"].isoformat(),
+    }
+
+
+@app.post("/groups")
+def create_group(
+    payload: GroupCreateRequest,
+    session_token: Optional[str] = Cookie(default=None, alias=SESSION_COOKIE_NAME),
+) -> dict[str, Any]:
+    user = _require_user(session_token)
+    creator_id = _to_uuid(user["id"])
+    group_name = payload.name.strip()
+    if len(group_name) < 2:
+        raise HTTPException(status_code=400, detail="Group name is too short")
+
+    group_id = uuid.uuid4()
+    with _db() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO chat_groups (id, name, created_by_user_id)
+                VALUES (%s, %s, %s)
+                """,
+                (group_id, group_name, creator_id),
+            )
+            cur.execute(
+                """
+                INSERT INTO group_members (group_id, user_id)
+                VALUES (%s, %s)
+                ON CONFLICT (group_id, user_id) DO NOTHING
+                """,
+                (group_id, creator_id),
+            )
+        conn.commit()
+
+    return {
+        "status": "ok",
+        "group": {
+            "id": str(group_id),
+            "name": group_name,
+        },
+    }
+
+
+@app.get("/groups")
+def list_groups(
+    session_token: Optional[str] = Cookie(default=None, alias=SESSION_COOKIE_NAME),
+) -> dict[str, Any]:
+    user = _require_user(session_token)
+    user_id = _to_uuid(user["id"])
+    with _db() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT g.id, g.name, g.created_by_user_id, g.created_at
+                FROM group_members gm
+                JOIN chat_groups g ON g.id = gm.group_id
+                WHERE gm.user_id = %s
+                ORDER BY g.created_at DESC
+                """,
+                (user_id,),
+            )
+            rows = cur.fetchall()
+    return {
+        "groups": [
+            {
+                "id": str(row["id"]),
+                "name": row["name"],
+                "created_by_user_id": str(row["created_by_user_id"]),
+                "created_at": row["created_at"].isoformat(),
+            }
+            for row in rows
+        ]
+    }
+
+
+@app.post("/groups/{group_id}/members")
+def add_group_member(
+    group_id: str,
+    payload: GroupAddMemberRequest,
+    session_token: Optional[str] = Cookie(default=None, alias=SESSION_COOKIE_NAME),
+) -> dict[str, Any]:
+    user = _require_user(session_token)
+    try:
+        actor_id = _to_uuid(user["id"])
+        safe_group_id = _to_uuid(group_id)
+        target_id = _to_uuid(payload.user_id)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail="Invalid id") from exc
+
+    if actor_id == target_id:
+        raise HTTPException(status_code=400, detail="You are already in the group")
+
+    with _db() as conn:
+        with conn.cursor() as cur:
+            _require_group_member(cur, safe_group_id, actor_id)
+
+            cur.execute("SELECT id, is_banned FROM users WHERE id = %s", (target_id,))
+            target = cur.fetchone()
+            if not target:
+                raise HTTPException(status_code=404, detail="User not found")
+            if target.get("is_banned"):
+                raise HTTPException(status_code=400, detail="Cannot add banned user")
+
+            # Group adds are limited to accepted connections.
+            if not _are_connected(cur, actor_id, target_id):
+                raise HTTPException(status_code=403, detail="You can only add your accepted connections")
+
+            cur.execute(
+                """
+                INSERT INTO group_members (group_id, user_id)
+                VALUES (%s, %s)
+                ON CONFLICT (group_id, user_id) DO NOTHING
+                """,
+                (safe_group_id, target_id),
+            )
+        conn.commit()
+
+    return {"status": "ok"}
+
+
+@app.get("/groups/{group_id}/messages")
+def list_group_messages(
+    group_id: str,
+    session_token: Optional[str] = Cookie(default=None, alias=SESSION_COOKIE_NAME),
+) -> dict[str, Any]:
+    user = _require_user(session_token)
+    try:
+        user_id = _to_uuid(user["id"])
+        safe_group_id = _to_uuid(group_id)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail="Invalid id") from exc
+
+    with _db() as conn:
+        with conn.cursor() as cur:
+            _require_group_member(cur, safe_group_id, user_id)
+            cur.execute(
+                """
+                SELECT gm.id, gm.sender_user_id, u.display_name, gm.content, gm.created_at
+                FROM group_messages gm
+                JOIN users u ON u.id = gm.sender_user_id
+                WHERE gm.group_id = %s
+                ORDER BY gm.created_at DESC
+                LIMIT 200
+                """,
+                (safe_group_id,),
+            )
+            rows = cur.fetchall()
+
+    rows.reverse()
+    return {
+        "messages": [
+            {
+                "id": row["id"],
+                "sender_user_id": str(row["sender_user_id"]),
+                "sender_display_name": row["display_name"],
+                "content": row["content"],
+                "created_at": row["created_at"].isoformat(),
+            }
+            for row in rows
+        ]
+    }
+
+
+@app.post("/groups/{group_id}/messages")
+def create_group_message(
+    group_id: str,
+    payload: GroupMessageCreateRequest,
+    session_token: Optional[str] = Cookie(default=None, alias=SESSION_COOKIE_NAME),
+) -> dict[str, Any]:
+    user = _require_user(session_token)
+    try:
+        sender_id = _to_uuid(user["id"])
+        safe_group_id = _to_uuid(group_id)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail="Invalid id") from exc
+
+    with _db() as conn:
+        with conn.cursor() as cur:
+            _require_group_member(cur, safe_group_id, sender_id)
+            cur.execute(
+                """
+                INSERT INTO group_messages (group_id, sender_user_id, content)
+                VALUES (%s, %s, %s)
+                RETURNING id, sender_user_id, content, created_at
+                """,
+                (safe_group_id, sender_id, payload.content.strip()),
+            )
+            row = cur.fetchone()
+        conn.commit()
+
+    return {
+        "id": row["id"],
+        "sender_user_id": str(row["sender_user_id"]),
         "content": row["content"],
         "created_at": row["created_at"].isoformat(),
     }

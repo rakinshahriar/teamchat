@@ -3,23 +3,23 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>FrontEnd OAuth Database</title>
-    <link rel="stylesheet" href="/app.css?v=20260407-6" />
+    <title>TeamChat</title>
+    <link rel="stylesheet" href="/app.css?v=20260407-11" />
     <script src="https://accounts.google.com/gsi/client" async defer></script>
-    <script src="/config.js?v=20260407-6" defer></script>
-    <script src="/app.js?v=20260407-6" defer></script>
+    <script src="/config.js?v=20260407-11" defer></script>
+    <script src="/app.js?v=20260407-11" defer></script>
   </head>
   <body>
     <main class="shell">
       <section class="auth-layout" id="authCard">
         <aside class="auth-side">
-          <div class="brand">FOD</div>
-          <h1>Welcome to FrontEnd OAuth Database</h1>
-          <p class="sub">Secure sign-in for your message vault and team administration.</p>
+          <div class="brand">TC</div>
+          <h1>Welcome to TeamChat</h1>
+          <p class="sub">Connect with users, accept requests, and chat privately.</p>
           <ul class="feature-list">
-            <li>Email verification and password reset</li>
-            <li>Role-based admin controls</li>
-            <li>Private message history per account</li>
+            <li>Search and connect with other users</li>
+            <li>Accept requests to unlock chat</li>
+            <li>Private direct messages between connections</li>
           </ul>
         </aside>
 
@@ -87,27 +87,66 @@
           </div>
         </header>
 
-        <div class="stats-strip">
-          <div class="stat">
-            <small>Total messages</small>
-            <strong id="messageCount">0</strong>
-          </div>
-          <div class="stat">
-            <small>Latest activity</small>
-            <strong id="latestMessageAt">-</strong>
-          </div>
-        </div>
+        <div class="chat-layout">
+          <aside class="chat-sidebar">
+            <section class="chat-block">
+              <h3>Find Users</h3>
+              <form id="connectionSearchForm" class="row">
+                <input id="connectionSearchInput" type="text" placeholder="Search by name or email" minlength="2" required />
+                <button type="submit">Search</button>
+              </form>
+              <ul id="connectionSearchResults" class="compact-list"></ul>
+            </section>
 
-        <form id="messageForm" class="message-form">
-          <textarea id="messageInput" placeholder="Write a message..." maxlength="2000" required></textarea>
-          <div class="row spread">
-            <small id="messageHint">Your message is stored under your account.</small>
-            <button type="submit">Save Message</button>
-          </div>
-          <small id="charCount" class="char-count">0 / 2000</small>
-        </form>
-        <h3>Past Messages</h3>
-        <ul id="messageList" class="message-list"></ul>
+            <section class="chat-block">
+              <h3>Incoming Requests</h3>
+              <ul id="incomingRequests" class="compact-list"></ul>
+            </section>
+
+            <section class="chat-block">
+              <h3>Outgoing Requests</h3>
+              <ul id="outgoingRequests" class="compact-list"></ul>
+            </section>
+
+            <section class="chat-block">
+              <h3>Connections</h3>
+              <ul id="connectionsList" class="compact-list"></ul>
+            </section>
+
+            <section class="chat-block">
+              <h3>Create Group</h3>
+              <form id="groupCreateForm" class="row">
+                <input id="groupNameInput" type="text" placeholder="Group name" minlength="2" maxlength="80" required />
+                <button type="submit">Create</button>
+              </form>
+            </section>
+
+            <section class="chat-block">
+              <h3>Groups</h3>
+              <ul id="groupsList" class="compact-list"></ul>
+            </section>
+          </aside>
+
+          <section class="chat-main">
+            <div class="row spread">
+              <h3 id="activeConnectionName">Select a connection</h3>
+              <small id="chatHint">You can only chat with accepted connections.</small>
+            </div>
+            <form id="groupMemberSearchForm" class="row hidden" style="margin-bottom: 8px">
+              <input id="groupMemberSearchInput" type="text" placeholder="Search user to add to this group" minlength="2" />
+              <button type="submit">Find</button>
+            </form>
+            <ul id="groupMemberSearchResults" class="compact-list hidden" style="margin-bottom: 10px"></ul>
+            <ul id="dmList" class="message-list"></ul>
+            <form id="dmForm" class="message-form">
+              <textarea id="dmInput" placeholder="Write a direct message..." maxlength="2000" required></textarea>
+              <div class="row spread">
+                <small id="charCount" class="char-count">0 / 2000</small>
+                <button type="submit">Send</button>
+              </div>
+            </form>
+          </section>
+        </div>
       </section>
     </main>
   </body>
