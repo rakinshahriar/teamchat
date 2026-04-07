@@ -107,3 +107,7 @@ ssh -o BatchMode=yes dietpi 'cd /opt/stacks/pi-remote-dev && docker compose ps'
 - Never commit .env
 - .env.example is safe to commit
 - Set COOKIE_SECURE=true when running behind HTTPS
+
+## License
+This project is licensed under the MIT License.
+See LICENSE for details.
