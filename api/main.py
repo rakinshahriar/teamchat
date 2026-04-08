@@ -186,29 +186,41 @@ def _hash_token(raw_token: str) -> str:
     return hashlib.sha256(raw_token.encode("utf-8")).hexdigest()
 
 
-def _make_signed_token(expiry_minutes: int) -> str:
-    """Create a self-expiring HMAC-signed token: <nonce>.<expiry_ts>.<sig>"""
+# Token type identifiers embedded inside signed tokens
+_TOKEN_TYPE_VERIFY = "v"
+_TOKEN_TYPE_RESET = "r"
+
+
+def _make_signed_token(expiry_minutes: int, token_type: str) -> str:
+    """Create a self-expiring HMAC-signed token: <nonce>.<type>.<expiry_ts>.<sig>
+
+    token_type must be one of the _TOKEN_TYPE_* constants.
+    It is included in the HMAC message so a verify token cannot be
+    accepted by the reset endpoint and vice-versa.
+    """
     nonce = secrets.token_urlsafe(32)
     expiry_ts = int((_utc_now() + timedelta(minutes=expiry_minutes)).timestamp())
-    msg = f"{nonce}|{expiry_ts}".encode()
+    msg = f"{nonce}|{token_type}|{expiry_ts}".encode()
     sig = hmac.new(TOKEN_SECRET.encode(), msg, hashlib.sha256).hexdigest()
-    return f"{nonce}.{expiry_ts}.{sig}"
+    return f"{nonce}.{token_type}.{expiry_ts}.{sig}"
 
 
-def _verify_signed_token(token_str: str, expired_detail: str) -> None:
-    """Verify HMAC signature and expiry of a signed token.
-    Raises HTTPException(400) on invalid/tampered/expired token.
+def _verify_signed_token(token_str: str, expected_type: str, expired_detail: str) -> None:
+    """Verify HMAC signature, token type, and expiry of a signed token.
+    Raises HTTPException(400) on invalid/tampered/wrong-type/expired token.
     Replay protection is done separately via DELETE-RETURNING in the DB.
     """
     parts = token_str.split(".")
-    if len(parts) != 3:
+    if len(parts) != 4:
         raise HTTPException(status_code=400, detail="Invalid token format")
-    nonce, expiry_ts_str, provided_sig = parts
+    nonce, token_type, expiry_ts_str, provided_sig = parts
+    if token_type != expected_type:
+        raise HTTPException(status_code=400, detail="Invalid token")
     try:
         expiry_ts = int(expiry_ts_str)
     except ValueError:
         raise HTTPException(status_code=400, detail="Invalid token format")
-    msg = f"{nonce}|{expiry_ts_str}".encode()
+    msg = f"{nonce}|{token_type}|{expiry_ts_str}".encode()
     expected_sig = hmac.new(TOKEN_SECRET.encode(), msg, hashlib.sha256).hexdigest()
     if not hmac.compare_digest(expected_sig, provided_sig):
         raise HTTPException(status_code=400, detail="Invalid token")
@@ -600,7 +612,7 @@ def _require_min_rank(session_token: Optional[str], minimum_rank: int) -> dict[s
 
 
 def _issue_email_verification_token(cur: psycopg.Cursor, user_id: uuid.UUID) -> tuple[str, datetime]:
-    raw_token = _make_signed_token(EMAIL_VERIFICATION_MINUTES)
+    raw_token = _make_signed_token(EMAIL_VERIFICATION_MINUTES, _TOKEN_TYPE_VERIFY)
     token_hash = _hash_token(raw_token)
     expires_at = _utc_now() + timedelta(minutes=EMAIL_VERIFICATION_MINUTES)
     cur.execute("DELETE FROM email_verification_tokens WHERE user_id = %s", (user_id,))
@@ -615,7 +627,7 @@ def _issue_email_verification_token(cur: psycopg.Cursor, user_id: uuid.UUID) -> 
 
 
 def _issue_password_reset_token(cur: psycopg.Cursor, user_id: uuid.UUID) -> tuple[str, datetime]:
-    raw_token = _make_signed_token(PASSWORD_RESET_MINUTES)
+    raw_token = _make_signed_token(PASSWORD_RESET_MINUTES, _TOKEN_TYPE_RESET)
     token_hash = _hash_token(raw_token)
     expires_at = _utc_now() + timedelta(minutes=PASSWORD_RESET_MINUTES)
     cur.execute("DELETE FROM password_reset_tokens WHERE user_id = %s", (user_id,))
@@ -1706,7 +1718,7 @@ def auth_login(
 
 @app.post("/auth/verify-email")
 def auth_verify_email(payload: VerifyEmailRequest) -> dict[str, str]:
-    _verify_signed_token(payload.token, "Verification token expired or already used")
+    _verify_signed_token(payload.token, _TOKEN_TYPE_VERIFY, "Verification token expired or already used")
     token_hash = _hash_token(payload.token)
     with _db() as conn:
         with conn.cursor() as cur:
@@ -1823,7 +1835,7 @@ def auth_password_reset_request(payload: VerificationRequest) -> dict[str, Any]:
 @app.post("/auth/password-reset/confirm")
 def auth_password_reset_confirm(payload: PasswordResetConfirmRequest) -> dict[str, str]:
     _validate_password_strength(payload.new_password)
-    _verify_signed_token(payload.token, "Reset token expired or already used")
+    _verify_signed_token(payload.token, _TOKEN_TYPE_RESET, "Reset token expired or already used")
     token_hash = _hash_token(payload.token)
 
     with _db() as conn:
