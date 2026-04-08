@@ -1,0 +1,38 @@
+# Files/folders that should not be copied during deploy sync
+.git/
+.github/
+.vscode/
+.DS_Store
+
+# Local environment files and secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+*.p8
+*.crt
+*.cer
+id_rsa
+id_ed25519
+*secret*
+*credentials*
+
+# Python artifacts
+__pycache__/
+*.pyc
+.pytest_cache/
+.mypy_cache/
+.venv/
+
+# Node artifacts
+node_modules/
+coverage/
+.next/
+
+# Logs and generated local outputs
+*.log
+token_cases.txt
+.env.ci

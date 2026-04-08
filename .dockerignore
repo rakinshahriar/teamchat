@@ -1,16 +1,21 @@
 # Docker ignore for build context
-# Ignore local env files
+# Ignore local env files and backups
 .env
 .env.*
+!.env.example
 
 # Node and build artifacts
 node_modules
 dist
 build
+.next
+coverage
 
 # Python cache
 __pycache__
 *.pyc
+.pytest_cache
+.mypy_cache
 
 # Private keys and certs
 *.pem
@@ -25,8 +30,13 @@ id_ed25519
 
 # Git and editor config
 .git
+.github
 .vscode
 .DS_Store
 
 # Logs
 *.log
+
+# Local tooling artifacts
+token_cases.txt
+.env.ci

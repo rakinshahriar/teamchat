@@ -1,0 +1,27 @@
+name: Setup Checks
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+      - master
+
+jobs:
+  validate-env-example:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Validate .env.example required keys
+        run: bash scripts/check-env-example.sh
+
+  validate-compose-config:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Verify Docker Compose configuration
+        run: bash scripts/check-compose-config.sh

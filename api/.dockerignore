@@ -3,6 +3,9 @@ __pycache__/
 *.pyo
 *.pyd
 .venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
 .env
 .env.*
 *.pem
@@ -17,3 +20,7 @@ id_ed25519
 *secret*
 *credentials*
 *.log
+.DS_Store
+.git
+.github
+.vscode

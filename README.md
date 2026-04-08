@@ -20,51 +20,56 @@ Everything runs with Docker Compose.
 - Use the admin page (rank-based controls)
 
 ## Quick Start (Local)
-1. Create your env file.
+1. Run the bootstrap script from the repo root.
 
 ```bash
-cp .env.example .env
+chmod +x setup.sh
+./setup.sh
 ```
 
-2. Open .env and fill the required values.
+What it does:
+- Creates `.env` from `.env.example` if missing.
+- Ensures `TOKEN_SECRET` exists and is at least 32 characters.
+- Keeps existing `.env` values if you already customized them.
 
-Required for basic login flow:
-- DATABASE_URL (or use the default from docker-compose)
-- WEB_ORIGIN
-- APP_BASE_URL
-- PUBLIC_API_BASE_URL
-- COOKIE_SECURE
-
-Required for email verification and reset:
-- SMTP_HOST
-- SMTP_PORT
-- SMTP_USERNAME
-- SMTP_PASSWORD
-- SMTP_FROM_EMAIL
-
-Optional SSO providers:
-- GOOGLE_CLIENT_ID
-- GITHUB_CLIENT_ID
-- GITHUB_CLIENT_SECRET
-- OIDC_PROVIDERS_JSON
-
-Current SSO status:
-- Google login works.
-- GitHub SSO and company OIDC SSO are not fully implemented yet.
-
-3. Start the stack.
+2. Start the stack.
 
 ```bash
 docker compose up -d --build
 ```
 
-4. Check health.
+3. Check health.
 
 ```bash
 docker compose ps
 curl -fsS http://127.0.0.1:8000/health
 curl -fsS http://127.0.0.1:3000/health
 ```
+
+4. Open the app.
+
+```text
+http://localhost:3000
+```
+
+## Manual Env Setup (If You Prefer)
+If you do not want to use `setup.sh`:
+
+```bash
+cp .env.example .env
+```
+
+Then set at least these values:
+- `TOKEN_SECRET` (required, minimum 32 characters)
+- `WEB_ORIGIN` (default local: `http://localhost:3000`)
+- `APP_BASE_URL` (default local: `http://localhost:3000`)
+- `COOKIE_SECURE` (`false` for local HTTP, `true` for HTTPS)
+
+For local development defaults in this repo:
+- `REQUIRE_EMAIL_VERIFICATION=false`
+- `EMAIL_DRY_RUN=true`
+
+These defaults avoid SMTP-related setup failures on first run.
 
 ## App URLs
 - Web app: /
@@ -97,16 +102,33 @@ If you use the helper script used in this repo:
 $HOME/bin/deploy2pi "$PWD" "/opt/stacks/pi-remote-dev"
 ```
 
+Deployment notes:
+- This repo includes `.deployignore` to avoid syncing local secrets/artifacts (for deploy tools that support exclude files).
+- Keep the remote `.env` managed on the Pi host.
+
 Then verify remotely:
 
 ```bash
 ssh -o BatchMode=yes dietpi 'cd /opt/stacks/pi-remote-dev && docker compose ps'
 ```
 
+Optional cleanup before deploy (safe for unused Docker artifacts):
+
+```bash
+ssh -o BatchMode=yes dietpi 'docker image prune -af && docker builder prune -af'
+```
+
 ## Security Notes
 - Never commit .env
 - .env.example is safe to commit
 - Set COOKIE_SECURE=true when running behind HTTPS
+
+## Common Setup Errors
+- `TOKEN_SECRET must be set and at least 32 characters`:
+  - Run `./setup.sh` again or set `TOKEN_SECRET` manually in `.env`.
+- `COOKIE_SECURE must be true for non-local WEB_ORIGIN`:
+  - For local use `WEB_ORIGIN=http://localhost:3000` and `COOKIE_SECURE=false`.
+  - For deployed HTTPS use `COOKIE_SECURE=true`.
 
 ## License
 This project is licensed under the MIT License.

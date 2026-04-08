@@ -1,5 +1,7 @@
 node_modules/
 npm-debug.log
+yarn-error.log
+pnpm-debug.log
 .env
 .env.*
 *.pem
@@ -14,3 +16,8 @@ id_ed25519
 *secret*
 *credentials*
 *.log
+.DS_Store
+.git
+.github
+.vscode
+coverage/
