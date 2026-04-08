@@ -5,6 +5,7 @@ import smtplib
 import os
 import re
 import secrets
+import struct
 import threading
 import time
 import uuid
@@ -192,17 +193,19 @@ _TOKEN_TYPE_RESET = "r"
 
 
 def _make_signed_token(expiry_minutes: int, token_type: str) -> str:
-    """Create a self-expiring HMAC-signed token: <nonce>.<type>.<expiry_ts>.<sig>
+    """Create a self-expiring HMAC-signed token: <nonce>.<type>.<expiry_b64u>.<sig_b64u>
 
     token_type must be one of the _TOKEN_TYPE_* constants.
     It is included in the HMAC message so a verify token cannot be
     accepted by the reset endpoint and vice-versa.
+    Expiry and HMAC signature are base64url-encoded (no padding) for compactness.
     """
     nonce = secrets.token_urlsafe(32)
     expiry_ts = int((_utc_now() + timedelta(minutes=expiry_minutes)).timestamp())
+    expiry_b64 = base64.urlsafe_b64encode(struct.pack(">I", expiry_ts)).rstrip(b"=").decode()
     msg = f"{nonce}|{token_type}|{expiry_ts}".encode()
-    sig = hmac.new(TOKEN_SECRET.encode(), msg, hashlib.sha256).hexdigest()
-    return f"{nonce}.{token_type}.{expiry_ts}.{sig}"
+    sig_b64 = base64.urlsafe_b64encode(hmac.new(TOKEN_SECRET.encode(), msg, hashlib.sha256).digest()).rstrip(b"=").decode()
+    return f"{nonce}.{token_type}.{expiry_b64}.{sig_b64}"
 
 
 def _verify_signed_token(token_str: str, expected_type: str, expired_detail: str) -> None:
@@ -213,16 +216,20 @@ def _verify_signed_token(token_str: str, expected_type: str, expired_detail: str
     parts = token_str.split(".")
     if len(parts) != 4:
         raise HTTPException(status_code=400, detail="Invalid token format")
-    nonce, token_type, expiry_ts_str, provided_sig = parts
+    nonce, token_type, expiry_b64, provided_sig_b64 = parts
     if token_type != expected_type:
         raise HTTPException(status_code=400, detail="Invalid token")
     try:
-        expiry_ts = int(expiry_ts_str)
-    except ValueError:
+        expiry_ts = struct.unpack(">I", base64.urlsafe_b64decode(expiry_b64 + "=="))[0]
+    except Exception:
         raise HTTPException(status_code=400, detail="Invalid token format")
-    msg = f"{nonce}|{token_type}|{expiry_ts_str}".encode()
-    expected_sig = hmac.new(TOKEN_SECRET.encode(), msg, hashlib.sha256).hexdigest()
-    if not hmac.compare_digest(expected_sig, provided_sig):
+    msg = f"{nonce}|{token_type}|{expiry_ts}".encode()
+    expected_sig_bytes = hmac.new(TOKEN_SECRET.encode(), msg, hashlib.sha256).digest()
+    try:
+        provided_sig_bytes = base64.urlsafe_b64decode(provided_sig_b64 + "==")
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid token format")
+    if not hmac.compare_digest(expected_sig_bytes, provided_sig_bytes):
         raise HTTPException(status_code=400, detail="Invalid token")
     if expiry_ts <= int(_utc_now().timestamp()):
         raise HTTPException(status_code=400, detail=expired_detail)
