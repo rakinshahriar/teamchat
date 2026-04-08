@@ -14,6 +14,7 @@ from datetime import datetime, timedelta, timezone
 from email.message import EmailMessage
 from typing import Any, Optional
 from urllib.parse import urlencode
+from zoneinfo import ZoneInfo
 
 import psycopg
 import requests
@@ -49,6 +50,7 @@ SSO_PKCE_COOKIE_NAME = "sso_pkce_verifier"
 SSO_PROVIDER_COOKIE_NAME = "sso_provider_key"
 SSO_INTENT_COOKIE_NAME = "sso_intent"
 SSO_DISPLAY_NAME_COOKIE_NAME = "sso_display_name"
+SSO_TOS_ACCEPTED_COOKIE_NAME = "sso_tos_accepted"
 SESSION_TTL_DAYS = int(os.getenv("SESSION_TTL_DAYS", "7"))
 COOKIE_SECURE = os.getenv("COOKIE_SECURE", "false").lower() == "true"
 WEB_ORIGIN = os.getenv("WEB_ORIGIN", "http://localhost:3000")
@@ -111,6 +113,7 @@ class GoogleAuthRequest(BaseModel):
     credential: str = Field(min_length=20)
     intent: str = Field(default="login", pattern="^(login|register)$")
     display_name: Optional[str] = Field(default=None, max_length=120)
+    tos_accepted: bool = Field(default=False)
 
 
 class RegisterRequest(BaseModel):
@@ -1011,35 +1014,50 @@ def startup() -> None:
     t.start()
 
 
-_CLEANUP_INTERVAL_SECONDS = 86400  # run once daily (HMAC tokens self-expire; cleanup only needed for never-clicked rows)
+_CLEANUP_LOCAL_TZ = ZoneInfo("Australia/Sydney")
+_CLEANUP_HOUR_LOCAL = 3
+_CLEANUP_MINUTE_LOCAL = 0
+
+
+def _seconds_until_next_daily_cleanup(now_utc: Optional[datetime] = None) -> float:
+    current_utc = now_utc or datetime.now(timezone.utc)
+    current_local = current_utc.astimezone(_CLEANUP_LOCAL_TZ)
+    next_local = current_local.replace(
+        hour=_CLEANUP_HOUR_LOCAL,
+        minute=_CLEANUP_MINUTE_LOCAL,
+        second=0,
+        microsecond=0,
+    )
+    if current_local >= next_local:
+        next_local += timedelta(days=1)
+    next_utc = next_local.astimezone(timezone.utc)
+    return max(1.0, (next_utc - current_utc).total_seconds())
 
 
 def _token_cleanup_loop() -> None:
-    """Daemon thread: periodically removes expired/used tokens and old rate-limit rows."""
+    """Daemon thread: daily cleanup at 03:00 Australia/Sydney, single pass."""
     while True:
+        sleep_seconds = _seconds_until_next_daily_cleanup()
+        next_local = (datetime.now(timezone.utc) + timedelta(seconds=sleep_seconds)).astimezone(_CLEANUP_LOCAL_TZ)
+        print(f"[cleanup] next scheduled run at {next_local.isoformat()} (Australia/Sydney)")
+        time.sleep(sleep_seconds)
+
         try:
             _purge_expired_tokens()
         except Exception as exc:  # noqa: BLE001
             print(f"[cleanup] error during token purge: {exc}")
-        time.sleep(_CLEANUP_INTERVAL_SECONDS)
 
 
 def _purge_expired_tokens() -> None:
     now = datetime.now(timezone.utc)
     with _db() as conn:
         with conn.cursor() as cur:
-            # Expired verification tokens (used ones are deleted immediately on redemption)
-            cur.execute(
-                "DELETE FROM email_verification_tokens WHERE expires_at < %s",
-                (now,),
-            )
+            # Purge all verification tokens on each scheduled cleanup run.
+            cur.execute("DELETE FROM email_verification_tokens")
             vt_deleted = cur.rowcount
 
-            # Expired password reset tokens (used ones are deleted immediately on redemption)
-            cur.execute(
-                "DELETE FROM password_reset_tokens WHERE expires_at < %s",
-                (now,),
-            )
+            # Purge all password reset tokens on each scheduled cleanup run.
+            cur.execute("DELETE FROM password_reset_tokens")
             rt_deleted = cur.rowcount
 
             # Expired sessions
@@ -1082,6 +1100,7 @@ def auth_sso_oidc_start(
     request: Request,
     intent: str = "login",
     display_name: Optional[str] = None,
+    tos_accepted: bool = False,
 ) -> RedirectResponse:
     intent_value = (intent or "login").strip().lower()
     if intent_value not in {"login", "register"}:
@@ -1089,6 +1108,8 @@ def auth_sso_oidc_start(
     signup_display_name = (display_name or "").strip()[:120]
     if intent_value == "register" and not signup_display_name:
         raise HTTPException(status_code=400, detail="Display name is required for SSO signup")
+    if intent_value == "register" and not tos_accepted:
+        raise HTTPException(status_code=400, detail="Terms of Service acceptance is required for SSO signup")
 
     company_key = _normalize_company_key(company)
     providers = _load_oidc_providers()
@@ -1170,6 +1191,15 @@ def auth_sso_oidc_start(
             max_age=10 * 60,
             path="/",
         )
+        response.set_cookie(
+            key=SSO_TOS_ACCEPTED_COOKIE_NAME,
+            value="1",
+            httponly=True,
+            secure=COOKIE_SECURE,
+            samesite="lax",
+            max_age=10 * 60,
+            path="/",
+        )
     return response
 
 
@@ -1184,6 +1214,7 @@ def auth_sso_oidc_callback(
     sso_pkce_verifier: Optional[str] = Cookie(default=None, alias=SSO_PKCE_COOKIE_NAME),
     sso_intent: Optional[str] = Cookie(default=None, alias=SSO_INTENT_COOKIE_NAME),
     sso_display_name: Optional[str] = Cookie(default=None, alias=SSO_DISPLAY_NAME_COOKIE_NAME),
+    sso_tos_accepted: Optional[str] = Cookie(default=None, alias=SSO_TOS_ACCEPTED_COOKIE_NAME),
     user_agent: Optional[str] = Header(default=None),
 ) -> RedirectResponse:
     if not sso_state or not secrets.compare_digest(state, sso_state):
@@ -1249,6 +1280,8 @@ def auth_sso_oidc_callback(
     intent_value = (sso_intent or "login").strip().lower()
     if intent_value not in {"login", "register"}:
         raise HTTPException(status_code=400, detail="Invalid SSO intent")
+    if intent_value == "register" and sso_tos_accepted != "1":
+        raise HTTPException(status_code=400, detail="Terms of Service acceptance is required for SSO signup")
 
     provider_display_name = str(userinfo.get("name") or userinfo.get("preferred_username") or email).strip()[:120]
     signup_display_name = (sso_display_name or "").strip()[:120]
@@ -1329,6 +1362,7 @@ def auth_sso_oidc_callback(
     redirect.delete_cookie(key=SSO_PKCE_COOKIE_NAME, path="/")
     redirect.delete_cookie(key=SSO_INTENT_COOKIE_NAME, path="/")
     redirect.delete_cookie(key=SSO_DISPLAY_NAME_COOKIE_NAME, path="/")
+    redirect.delete_cookie(key=SSO_TOS_ACCEPTED_COOKIE_NAME, path="/")
     return redirect
 
 
@@ -1453,6 +1487,8 @@ def auth_sso_github_callback(
             existing = cur.fetchone()
 
             if existing:
+                if intent_value == "register":
+                    raise HTTPException(status_code=409, detail="Account already exists. Please sign in instead.")
                 if existing.get("is_banned"):
                     raise HTTPException(status_code=403, detail="Account is banned")
                 user_id = existing["id"]
@@ -1538,6 +1574,8 @@ def auth_google(
     chosen_display_name = (payload.display_name or "").strip()[:120] if intent_value == "register" else provider_display_name
     if intent_value == "register" and not chosen_display_name:
         raise HTTPException(status_code=400, detail="Display name is required for Google signup")
+    if intent_value == "register" and not payload.tos_accepted:
+        raise HTTPException(status_code=400, detail="Terms of Service acceptance is required for Google signup")
 
     picture_url = token_info.get("picture")
 
@@ -1565,6 +1603,11 @@ def auth_google(
                     (picture_url, user_id),
                 )
             else:
+                if intent_value != "register":
+                    raise HTTPException(
+                        status_code=404,
+                        detail="No account found. Please create an account first.",
+                    )
                 new_user = True
                 user_id = uuid.uuid4()
                 cur.execute(

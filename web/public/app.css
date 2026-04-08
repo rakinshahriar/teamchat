@@ -159,6 +159,43 @@ h2 {
   margin-bottom: 6px;
 }
 
+#googleDisplayNameNotice {
+  margin: 0;
+  min-height: 0;
+  font-size: 13px;
+}
+
+#googleDisplayNameNotice:empty {
+  display: none;
+}
+
+#googleDisplayNameInput {
+  min-height: 52px;
+  padding: 11px 12px;
+  font-size: 16px;
+  border-radius: 11px;
+}
+
+.dialog-terms-check {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  font-weight: 600;
+  color: var(--text);
+  font-size: 13px;
+}
+
+.dialog-terms-check input[type='checkbox'] {
+  width: 16px;
+  height: 16px;
+  margin-top: 1px;
+}
+
+.dialog-terms-check a {
+  color: #2151a3;
+  font-weight: 700;
+}
+
 .auth-divider {
   margin: 10px 0 4px;
   text-align: center;
@@ -340,6 +377,36 @@ textarea:focus {
   border: 1px solid var(--line);
   border-radius: 10px;
   background: #fff;
+}
+
+.terms-page-shell {
+  max-width: 860px;
+  margin: 20px auto;
+}
+
+.terms-page-card {
+  padding: 22px;
+}
+
+.terms-page-content {
+  line-height: 1.65;
+}
+
+.terms-page-content p {
+  margin: 0 0 14px;
+}
+
+.terms-page-content h3 {
+  margin: 20px 0 10px;
+}
+
+.terms-page-content ul {
+  margin: 0 0 16px;
+  padding-left: 22px;
+}
+
+.terms-page-content li {
+  margin-bottom: 8px;
 }
 
 label {
@@ -853,6 +920,31 @@ pre {
     width: 100%;
     flex-wrap: wrap;
   }
+
+  .terms-dialog {
+    max-width: 96vw;
+  }
+
+  .terms-dialog-card {
+    padding: 16px;
+    gap: 12px;
+  }
+
+  .terms-frame {
+    min-height: 62dvh;
+  }
+
+  .terms-page-shell {
+    margin: 10px auto;
+  }
+
+  .terms-page-card {
+    padding: 16px;
+  }
+
+  .terms-page-content {
+    line-height: 1.72;
+  }
 }
 
 @media (max-width: 1080px) and (orientation: portrait) {
@@ -1024,6 +1116,25 @@ pre {
     padding: 14px;
     border-radius: 14px;
     display: none;
+  }
+
+  .terms-dialog {
+    max-width: min(96vw, 680px);
+  }
+
+  .terms-dialog-card {
+    padding: 20px 18px;
+    gap: 12px;
+  }
+
+  .terms-frame {
+    min-height: min(70dvh, 720px);
+  }
+
+  #googleDisplayNameInput {
+    min-height: 52px;
+    padding: 9px 10px;
+    font-size: 16px;
   }
 
 }

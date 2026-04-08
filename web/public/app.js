@@ -18,6 +18,12 @@ const companySsoDialog = document.getElementById('companySsoDialog');
 const companySsoForm = document.getElementById('companySsoForm');
 const companySsoDomainInput = document.getElementById('companySsoDomainInput');
 const companySsoCancelBtn = document.getElementById('companySsoCancelBtn');
+const googleDisplayNameDialog = document.getElementById('googleDisplayNameDialog');
+const googleDisplayNameForm = document.getElementById('googleDisplayNameForm');
+const googleDisplayNameInput = document.getElementById('googleDisplayNameInput');
+const googleDisplayNameTerms = document.getElementById('googleDisplayNameTerms');
+const googleDisplayNameNotice = document.getElementById('googleDisplayNameNotice');
+const googleDisplayNameCancelBtn = document.getElementById('googleDisplayNameCancelBtn');
 const loginEmail = document.getElementById('loginEmail');
 const loginPassword = document.getElementById('loginPassword');
 const authStack = document.getElementById('authStack');
@@ -60,6 +66,7 @@ let selectedGroupId = null;
 let selectedChatType = null;
 let pendingSsoIntent = 'login';
 let pendingSsoDisplayName = '';
+let pendingSsoTosAccepted = false;
 const AUTH_MODE_STORAGE_KEY = 'teamchat_auth_mode';
 
 function setViewMode(isAuthView) {
@@ -482,19 +489,100 @@ async function runGroupMemberSearch(event) {
   renderSimpleList(groupMemberSearchResults, rows, 'No users found.');
 }
 
+function requestSignupDetails(initialValue = '') {
+  return new Promise((resolve) => {
+    if (!googleDisplayNameDialog || !googleDisplayNameForm || !googleDisplayNameInput) {
+      resolve(null);
+      return;
+    }
+
+    let completed = false;
+    googleDisplayNameInput.value = initialValue;
+    if (googleDisplayNameTerms) {
+      googleDisplayNameTerms.checked = false;
+    }
+    if (googleDisplayNameNotice) {
+      googleDisplayNameNotice.textContent = '';
+    }
+
+    const cleanup = () => {
+      googleDisplayNameForm.removeEventListener('submit', handleSubmit);
+      if (googleDisplayNameCancelBtn) {
+        googleDisplayNameCancelBtn.removeEventListener('click', handleCancel);
+      }
+      googleDisplayNameDialog.removeEventListener('close', handleClose);
+    };
+
+    const finish = (value) => {
+      if (completed) {
+        return;
+      }
+      completed = true;
+      cleanup();
+      resolve(value);
+    };
+
+    const handleSubmit = (event) => {
+      event.preventDefault();
+      const value = (googleDisplayNameInput.value || '').trim();
+      if (!value) {
+        if (googleDisplayNameNotice) {
+          googleDisplayNameNotice.style.color = '#b42318';
+          googleDisplayNameNotice.textContent = 'Display name is required to continue.';
+        }
+        googleDisplayNameInput.focus();
+        return;
+      }
+      if (googleDisplayNameTerms && !googleDisplayNameTerms.checked) {
+        if (googleDisplayNameNotice) {
+          googleDisplayNameNotice.style.color = '#b42318';
+          googleDisplayNameNotice.textContent = 'Please accept the Terms of Service to continue.';
+        }
+        googleDisplayNameTerms.focus();
+        return;
+      }
+      googleDisplayNameDialog.close('continue');
+      finish({ displayName: value, tosAccepted: true });
+    };
+
+    const handleCancel = () => {
+      googleDisplayNameDialog.close('cancel');
+      finish(null);
+    };
+
+    const handleClose = () => {
+      if (completed) {
+        return;
+      }
+      finish(null);
+    };
+
+    googleDisplayNameForm.addEventListener('submit', handleSubmit);
+    if (googleDisplayNameCancelBtn) {
+      googleDisplayNameCancelBtn.addEventListener('click', handleCancel);
+    }
+    googleDisplayNameDialog.addEventListener('close', handleClose);
+    googleDisplayNameDialog.showModal();
+    googleDisplayNameInput.focus();
+    googleDisplayNameInput.select();
+  });
+}
+
 async function onGoogleCredential(response) {
   try {
     const registerIntent = isRegisterMode();
-    const signupDisplayName = getSignupDisplayName();
-    if (registerIntent && !signupDisplayName) {
-      loginNotice.style.color = '#b42318';
-      loginNotice.textContent = 'Please enter a display name before continuing with Google signup.';
-      return;
-    }
-    if (registerIntent && registerTerms && !registerTerms.checked) {
-      loginNotice.style.color = '#b42318';
-      loginNotice.textContent = 'Please accept the Terms of Service before creating an account.';
-      return;
+    let signupDisplayName = '';
+    if (registerIntent) {
+      const signupDetails = await requestSignupDetails(getSignupDisplayName());
+      if (!signupDetails?.displayName || !signupDetails.tosAccepted) {
+        loginNotice.style.color = '#b42318';
+        loginNotice.textContent = 'Signup cancelled. Preferred name and ToS are required to create your account.';
+        return;
+      }
+      signupDisplayName = signupDetails.displayName;
+      if (registerName) {
+        registerName.value = signupDisplayName;
+      }
     }
     loginNotice.textContent = '';
     await api('/auth/google', {
@@ -503,6 +591,7 @@ async function onGoogleCredential(response) {
         credential: response.credential,
         intent: registerIntent ? 'register' : 'login',
         display_name: registerIntent ? signupDisplayName : undefined,
+        tos_accepted: registerIntent,
       }),
     });
     await initSession();
@@ -543,6 +632,11 @@ async function registerManual(event) {
 
 if (termsOpenBtn && termsDialog) {
   termsOpenBtn.addEventListener('click', () => {
+    const isPortraitTermsMode = window.matchMedia('(max-width: 1080px) and (orientation: portrait)').matches;
+    if (isPortraitTermsMode) {
+      window.open('/terms.html', '_blank', 'noopener');
+      return;
+    }
     termsDialog.showModal();
   });
 }
@@ -832,22 +926,25 @@ if (authStack) {
 }
 
 if (companySsoBtn) {
-  companySsoBtn.addEventListener('click', () => {
+  companySsoBtn.addEventListener('click', async () => {
     const registerIntent = isRegisterMode();
-    const signupDisplayName = getSignupDisplayName();
-    if (registerIntent && !signupDisplayName) {
-      loginNotice.style.color = '#b42318';
-      loginNotice.textContent = 'Please enter a display name before continuing with Company SSO signup.';
-      return;
-    }
-    if (registerIntent && registerTerms && !registerTerms.checked) {
-      loginNotice.style.color = '#b42318';
-      loginNotice.textContent = 'Please accept the Terms of Service before creating an account.';
-      return;
+    let signupDisplayName = '';
+    if (registerIntent) {
+      const signupDetails = await requestSignupDetails(getSignupDisplayName());
+      if (!signupDetails?.displayName || !signupDetails.tosAccepted) {
+        loginNotice.style.color = '#b42318';
+        loginNotice.textContent = 'Signup cancelled. Preferred name and ToS are required to create your account.';
+        return;
+      }
+      signupDisplayName = signupDetails.displayName;
+      if (registerName) {
+        registerName.value = signupDisplayName;
+      }
     }
 
     pendingSsoIntent = registerIntent ? 'register' : 'login';
     pendingSsoDisplayName = registerIntent ? signupDisplayName : '';
+    pendingSsoTosAccepted = registerIntent;
     if (!companySsoDialog || !companySsoDomainInput) {
       return;
     }
@@ -881,6 +978,7 @@ if (companySsoForm) {
     });
     if (pendingSsoIntent === 'register' && pendingSsoDisplayName) {
       params.set('display_name', pendingSsoDisplayName);
+      params.set('tos_accepted', pendingSsoTosAccepted ? '1' : '0');
     }
     const startUrl = `${apiBase}/auth/sso/oidc/start?${params.toString()}`;
     window.location.assign(startUrl);

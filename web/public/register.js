@@ -69,6 +69,11 @@ async function registerManual(event) {
 
 if (termsOpenBtn && termsDialog) {
   termsOpenBtn.addEventListener('click', () => {
+    const isPortraitTermsMode = window.matchMedia('(max-width: 1080px) and (orientation: portrait)').matches;
+    if (isPortraitTermsMode) {
+      window.open('/terms.html', '_blank', 'noopener');
+      return;
+    }
     termsDialog.showModal();
   });
 }

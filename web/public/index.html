@@ -4,10 +4,10 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>TeamChat</title>
-    <link rel="stylesheet" href="/app.css?v=20260408-3" />
+    <link rel="stylesheet" href="/app.css?v=20260408-5" />
     <script src="https://accounts.google.com/gsi/client" async defer></script>
-    <script src="/config.js?v=20260408-3" defer></script>
-    <script src="/app.js?v=20260408-3" defer></script>
+    <script src="/config.js?v=20260408-4" defer></script>
+    <script src="/app.js?v=20260408-5" defer></script>
   </head>
   <body>
     <main class="shell">
@@ -107,6 +107,23 @@
           <div class="row" style="justify-content: flex-end">
             <button id="companySsoCancelBtn" class="ghost" type="button">Cancel</button>
             <button id="companySsoContinueBtn" type="submit">Continue</button>
+          </div>
+        </form>
+      </dialog>
+
+      <dialog id="googleDisplayNameDialog" class="terms-dialog">
+        <form id="googleDisplayNameForm" method="dialog" class="terms-dialog-card">
+          <h3>You are almost there</h3>
+          <p class="sub" style="margin: 0">Provide your preferred display name and accept the Terms of Service to get started.</p>
+          <input id="googleDisplayNameInput" type="text" placeholder="Display name" maxlength="120" required />
+          <label class="dialog-terms-check" for="googleDisplayNameTerms">
+            <input id="googleDisplayNameTerms" type="checkbox" required />
+            <span>I confirm legal age and agree to the <a href="/terms.html" target="_blank" rel="noopener">Terms of Service</a>.</span>
+          </label>
+          <div id="googleDisplayNameNotice" class="notice" role="status" aria-live="polite"></div>
+          <div class="row" style="justify-content: flex-end">
+            <button id="googleDisplayNameCancelBtn" class="ghost" type="button">Cancel</button>
+            <button id="googleDisplayNameContinueBtn" type="submit">Continue</button>
           </div>
         </form>
       </dialog>
