@@ -27,6 +27,16 @@ from psycopg.rows import dict_row
 
 app = FastAPI()
 
+
+def _env_int(name: str, default: int) -> int:
+    raw = (os.getenv(name) or "").strip()
+    if not raw:
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        return default
+
 DATABASE_URL = os.getenv("DATABASE_URL", "")
 GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID", "").strip()
 GITHUB_CLIENT_ID = os.getenv("GITHUB_CLIENT_ID", "").strip()
@@ -47,7 +57,7 @@ PUBLIC_API_BASE_URL = os.getenv("PUBLIC_API_BASE_URL", "").strip().rstrip("/")
 REQUIRE_EMAIL_VERIFICATION = os.getenv("REQUIRE_EMAIL_VERIFICATION", "true").lower() == "true"
 TOKEN_PREVIEW_IN_RESPONSE = os.getenv("TOKEN_PREVIEW_IN_RESPONSE", "true").lower() == "true"
 SMTP_HOST = os.getenv("SMTP_HOST", "").strip()
-SMTP_PORT = int((os.getenv("SMTP_PORT") or "587").strip() or "587")
+SMTP_PORT = _env_int("SMTP_PORT", 587)
 SMTP_USERNAME = os.getenv("SMTP_USERNAME", "").strip()
 SMTP_PASSWORD = os.getenv("SMTP_PASSWORD", "")
 SMTP_FROM_EMAIL = os.getenv("SMTP_FROM_EMAIL", "").strip()
@@ -244,8 +254,9 @@ def _db() -> psycopg.Connection:
     return psycopg.connect(DATABASE_URL, row_factory=dict_row)
 
 
-def _smtp_is_configured() -> bool:
-    return bool(SMTP_HOST and SMTP_FROM_EMAIL)
+# def _smtp_is_configured() -> bool:
+#     # SMTP transport is intentionally disabled; Brevo API is the only active provider.
+#     return False
 
 
 def _brevo_api_is_configured() -> bool:
@@ -253,10 +264,8 @@ def _brevo_api_is_configured() -> bool:
 
 
 def _email_is_configured() -> bool:
-    provider = EMAIL_PROVIDER if EMAIL_PROVIDER in {"smtp", "brevo_api"} else "smtp"
-    if provider == "brevo_api":
-        return _brevo_api_is_configured()
-    return _smtp_is_configured()
+    # SMTP is disabled; treat Brevo API as the only valid provider.
+    return _brevo_api_is_configured()
 
 
 def _send_email(to_email: str, subject: str, text_body: str, html_body: Optional[str] = None) -> None:
@@ -264,6 +273,9 @@ def _send_email(to_email: str, subject: str, text_body: str, html_body: Optional
         print(f"[EMAIL_DRY_RUN] To: {to_email} | Subject: {subject}", flush=True)
         return
     provider = EMAIL_PROVIDER if EMAIL_PROVIDER in {"smtp", "brevo_api"} else "smtp"
+
+    if provider != "brevo_api":
+        raise HTTPException(status_code=503, detail="SMTP transport is disabled; set EMAIL_PROVIDER=brevo_api")
 
     if provider == "brevo_api":
         if not _brevo_api_is_configured():
@@ -294,36 +306,8 @@ def _send_email(to_email: str, subject: str, text_body: str, html_body: Optional
         except Exception as exc:
             raise HTTPException(status_code=502, detail="Failed to deliver email via Brevo API") from exc
 
-    if not _smtp_is_configured():
-        raise HTTPException(status_code=503, detail="SMTP is not configured for emails")
-
-    msg = EmailMessage()
-    msg["From"] = SMTP_FROM_EMAIL
-    msg["To"] = to_email
-    msg["Subject"] = subject
-    msg.set_content(text_body)
-    if html_body:
-        msg.add_alternative(html_body, subtype="html")
-
-    try:
-        if SMTP_USE_SSL:
-            with smtplib.SMTP_SSL(SMTP_HOST, SMTP_PORT, timeout=20) as smtp:
-                if SMTP_USERNAME:
-                    smtp.login(SMTP_USERNAME, SMTP_PASSWORD)
-                smtp.send_message(msg)
-        else:
-            with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=20) as smtp:
-                smtp.ehlo()
-                if SMTP_USE_STARTTLS:
-                    smtp.starttls()
-                    smtp.ehlo()
-                if SMTP_USERNAME:
-                    smtp.login(SMTP_USERNAME, SMTP_PASSWORD)
-                smtp.send_message(msg)
-    except HTTPException:
-        raise
-    except Exception as exc:
-        raise HTTPException(status_code=502, detail="Failed to deliver email via SMTP") from exc
+    # SMTP path intentionally disabled.
+    raise HTTPException(status_code=503, detail="SMTP transport is disabled; set EMAIL_PROVIDER=brevo_api")
 
 
 def _normalize_email(email: str) -> str:
@@ -1088,7 +1072,7 @@ def health() -> dict[str, Any]:
         "rbac_enabled": True,
         "email_provider": EMAIL_PROVIDER if EMAIL_PROVIDER in {"smtp", "brevo_api"} else "smtp",
         "email_configured": _email_is_configured(),
-        "smtp_configured": _smtp_is_configured(),
+        "smtp_configured": False,
     }
 
 
