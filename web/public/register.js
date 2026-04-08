@@ -8,8 +8,7 @@ const termsDialog = document.getElementById('termsDialog');
 const termsOpenBtn = document.getElementById('termsOpenBtn');
 const termsCloseBtn = document.getElementById('termsCloseBtn');
 
-const computedApiBase = `${window.location.protocol}//${window.location.hostname}:8000`;
-const apiBase = window.APP_CONFIG?.apiBase || computedApiBase;
+const apiBase = window.APP_CONFIG?.apiBase || '/api';
 
 async function api(path, options = {}) {
   const res = await fetch(`${apiBase}${path}`, {

@@ -11,6 +11,11 @@ RUN python -m pip install --no-cache-dir --upgrade pip \
 
 COPY main.py /app/main.py
 
+RUN useradd -u 10001 -m appuser \
+	&& chown -R appuser:appuser /app
+
+USER appuser
+
 EXPOSE 8000
 
 CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]

@@ -1,5 +1,4 @@
-const computedApiBase = `${window.location.protocol}//${window.location.hostname}:8000`;
-const apiBase = window.APP_CONFIG?.apiBase || computedApiBase;
+const apiBase = window.APP_CONFIG?.apiBase || '/api';
 
 const verifyForm = document.getElementById('verifyForm');
 const verifyToken = document.getElementById('verifyToken');

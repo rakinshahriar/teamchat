@@ -53,8 +53,7 @@ const groupMemberSearchResults = document.getElementById('groupMemberSearchResul
 const companySsoBtn = document.getElementById('companySsoBtn');
 const bodyEl = document.body;
 
-const computedApiBase = `${window.location.protocol}//${window.location.hostname}:8000`;
-const apiBase = window.APP_CONFIG?.apiBase || computedApiBase;
+const apiBase = window.APP_CONFIG?.apiBase || '/api';
 
 let currentUser = null;
 let allConnections = [];

@@ -1,5 +1,4 @@
-const computedApiBase = `${window.location.protocol}//${window.location.hostname}:8000`;
-const apiBase = window.APP_CONFIG?.apiBase || computedApiBase;
+const apiBase = window.APP_CONFIG?.apiBase || '/api';
 
 const refreshBtn = document.getElementById('refreshBtn');
 const adminStatus = document.getElementById('adminStatus');

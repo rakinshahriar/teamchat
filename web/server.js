@@ -5,6 +5,8 @@ const port = process.env.PORT || 3000;
 const googleClientId = process.env.GOOGLE_CLIENT_ID || '';
 const oidcProvidersJson = process.env.OIDC_PROVIDERS_JSON || '';
 const publicApiBase = process.env.PUBLIC_API_BASE_URL || '';
+const internalApiBase = process.env.INTERNAL_API_BASE_URL || 'http://api:8000';
+const resolvedPublicApiBase = publicApiBase.trim().startsWith('/') ? publicApiBase.trim() : '/api';
 
 app.set('trust proxy', true);
 
@@ -25,6 +27,7 @@ app.use((req, res, next) => {
   res.setHeader('X-Content-Type-Options', 'nosniff');
   // Allow same-origin framing so the Terms dialog iframe can render /terms.html.
   res.setHeader('X-Frame-Options', 'SAMEORIGIN');
+  res.setHeader('Content-Security-Policy', "default-src 'self'; script-src 'self' https://accounts.google.com; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; frame-src 'self' https://accounts.google.com; connect-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'self'; form-action 'self'");
   res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
   res.setHeader('Permissions-Policy', 'camera=(), microphone=(), geolocation=()');
   if (forwardedProto === 'https') {
@@ -39,12 +42,62 @@ app.use((req, res, next) => {
   next();
 });
 
+async function readRequestBody(req) {
+  return await new Promise((resolve, reject) => {
+    const chunks = [];
+    req.on('data', (chunk) => chunks.push(chunk));
+    req.on('end', () => resolve(Buffer.concat(chunks)));
+    req.on('error', reject);
+  });
+}
+
+app.use('/api', async (req, res) => {
+  const upstreamPath = req.originalUrl.replace(/^\/api/, '') || '/';
+  const targetUrl = `${internalApiBase}${upstreamPath}`;
+  const method = String(req.method || 'GET').toUpperCase();
+
+  const headers = { ...req.headers };
+  delete headers.host;
+  delete headers['content-length'];
+
+  let body;
+  if (method !== 'GET' && method !== 'HEAD') {
+    const raw = await readRequestBody(req);
+    if (raw.length > 0) {
+      body = raw;
+    }
+  }
+
+  try {
+    const upstream = await fetch(targetUrl, {
+      method,
+      headers,
+      body,
+      redirect: 'manual',
+    });
+
+    res.status(upstream.status);
+    upstream.headers.forEach((value, key) => {
+      if (key.toLowerCase() === 'transfer-encoding') {
+        return;
+      }
+      res.setHeader(key, value);
+    });
+
+    const data = Buffer.from(await upstream.arrayBuffer());
+    res.send(data);
+  } catch (err) {
+    console.error('API proxy error:', err && err.message ? err.message : err);
+    res.status(502).json({ detail: 'API upstream unreachable' });
+  }
+});
+
 app.use(express.static('public'));
 
 app.get('/config.js', (_req, res) => {
   const safeClientId = JSON.stringify(googleClientId);
   const safeOidcEnabled = JSON.stringify(Boolean(oidcProvidersJson.trim()));
-  const safeApiBase = JSON.stringify(publicApiBase);
+  const safeApiBase = JSON.stringify(resolvedPublicApiBase);
   res.type('application/javascript');
   res.send(`window.APP_CONFIG = { googleClientId: ${safeClientId}, oidcSsoEnabled: ${safeOidcEnabled}, apiBase: ${safeApiBase} };`);
 });

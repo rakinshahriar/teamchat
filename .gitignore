@@ -22,3 +22,10 @@ id_ed25519
 
 # VS Code local logs/state
 .vscode/*.log
+
+# Python cache/build artifacts
+__pycache__/
+*.pyc
+
+# Local token harness generated output
+token_cases.txt

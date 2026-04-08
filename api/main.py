@@ -57,7 +57,7 @@ WEB_ORIGIN = os.getenv("WEB_ORIGIN", "http://localhost:3000")
 APP_BASE_URL = os.getenv("APP_BASE_URL", WEB_ORIGIN).rstrip("/")
 PUBLIC_API_BASE_URL = os.getenv("PUBLIC_API_BASE_URL", "").strip().rstrip("/")
 REQUIRE_EMAIL_VERIFICATION = os.getenv("REQUIRE_EMAIL_VERIFICATION", "true").lower() == "true"
-TOKEN_PREVIEW_IN_RESPONSE = os.getenv("TOKEN_PREVIEW_IN_RESPONSE", "true").lower() == "true"
+TOKEN_PREVIEW_IN_RESPONSE = os.getenv("TOKEN_PREVIEW_IN_RESPONSE", "false").lower() == "true"
 SMTP_HOST = os.getenv("SMTP_HOST", "").strip()
 SMTP_PORT = _env_int("SMTP_PORT", 587)
 SMTP_USERNAME = os.getenv("SMTP_USERNAME", "").strip()
@@ -70,6 +70,25 @@ EMAIL_PROVIDER = os.getenv("EMAIL_PROVIDER", "smtp").strip().lower()
 BREVO_API_KEY = os.getenv("BREVO_API_KEY", "").strip()
 BREVO_API_URL = os.getenv("BREVO_API_URL", "https://api.brevo.com/v3/smtp/email").strip()
 TOKEN_SECRET = os.getenv("TOKEN_SECRET", "")
+
+
+def _is_local_origin(url: str) -> bool:
+    m = re.match(r"^https?://([^/:]+)", (url or "").strip(), re.IGNORECASE)
+    if not m:
+        return True
+    host = m.group(1).lower()
+    return host in {"localhost", "127.0.0.1", "::1", "api", "web", "db"}
+
+
+def _validate_security_config() -> None:
+    # TOKEN_SECRET signs session and one-time tokens; weak/missing values are unsafe.
+    if not TOKEN_SECRET or len(TOKEN_SECRET) < 32:
+        raise RuntimeError("TOKEN_SECRET must be set and at least 32 characters")
+    if not COOKIE_SECURE and not _is_local_origin(WEB_ORIGIN):
+        raise RuntimeError("COOKIE_SECURE must be true for non-local WEB_ORIGIN")
+
+
+_validate_security_config()
 
 app.add_middleware(
     CORSMiddleware,
