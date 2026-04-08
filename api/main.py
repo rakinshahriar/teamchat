@@ -1,9 +1,12 @@
 import hashlib
+import hmac
 import json
 import smtplib
 import os
 import re
 import secrets
+import threading
+import time
 import uuid
 import base64
 from datetime import datetime, timedelta, timezone
@@ -15,7 +18,7 @@ import psycopg
 import requests
 from fastapi import Cookie, FastAPI, Header, HTTPException, Request, Response, status
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import RedirectResponse
+from fastapi.responses import JSONResponse, RedirectResponse
 from google.auth.transport import requests as google_requests
 from google.oauth2 import id_token
 from pydantic import BaseModel, Field
@@ -49,6 +52,8 @@ SMTP_PASSWORD = os.getenv("SMTP_PASSWORD", "")
 SMTP_FROM_EMAIL = os.getenv("SMTP_FROM_EMAIL", "").strip()
 SMTP_USE_SSL = os.getenv("SMTP_USE_SSL", "false").lower() == "true"
 SMTP_USE_STARTTLS = os.getenv("SMTP_USE_STARTTLS", "true").lower() == "true"
+EMAIL_DRY_RUN = os.getenv("EMAIL_DRY_RUN", "false").lower() == "true"
+TOKEN_SECRET = os.getenv("TOKEN_SECRET", "")
 
 app.add_middleware(
     CORSMiddleware,
@@ -165,8 +170,8 @@ PASSWORD_MIN_LENGTH = 10
 MAX_FAILED_LOGIN_ATTEMPTS = 5
 LOCKOUT_MINUTES = 15
 EMAIL_REGEX = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
-EMAIL_VERIFICATION_HOURS = 24
-PASSWORD_RESET_MINUTES = 5
+EMAIL_VERIFICATION_MINUTES = 5
+PASSWORD_RESET_MINUTES = 15
 MIN_RANK = 1
 MAX_RANK = 7
 ADMIN_MIN_RANK = 2
@@ -181,9 +186,34 @@ def _hash_token(raw_token: str) -> str:
     return hashlib.sha256(raw_token.encode("utf-8")).hexdigest()
 
 
-def _new_token_pair() -> tuple[str, str]:
-    raw_token = secrets.token_urlsafe(48)
-    return raw_token, _hash_token(raw_token)
+def _make_signed_token(expiry_minutes: int) -> str:
+    """Create a self-expiring HMAC-signed token: <nonce>.<expiry_ts>.<sig>"""
+    nonce = secrets.token_urlsafe(32)
+    expiry_ts = int((_utc_now() + timedelta(minutes=expiry_minutes)).timestamp())
+    msg = f"{nonce}|{expiry_ts}".encode()
+    sig = hmac.new(TOKEN_SECRET.encode(), msg, hashlib.sha256).hexdigest()
+    return f"{nonce}.{expiry_ts}.{sig}"
+
+
+def _verify_signed_token(token_str: str, expired_detail: str) -> None:
+    """Verify HMAC signature and expiry of a signed token.
+    Raises HTTPException(400) on invalid/tampered/expired token.
+    Replay protection is done separately via DELETE-RETURNING in the DB.
+    """
+    parts = token_str.split(".")
+    if len(parts) != 3:
+        raise HTTPException(status_code=400, detail="Invalid token format")
+    nonce, expiry_ts_str, provided_sig = parts
+    try:
+        expiry_ts = int(expiry_ts_str)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid token format")
+    msg = f"{nonce}|{expiry_ts_str}".encode()
+    expected_sig = hmac.new(TOKEN_SECRET.encode(), msg, hashlib.sha256).hexdigest()
+    if not hmac.compare_digest(expected_sig, provided_sig):
+        raise HTTPException(status_code=400, detail="Invalid token")
+    if expiry_ts <= int(_utc_now().timestamp()):
+        raise HTTPException(status_code=400, detail=expired_detail)
 
 
 def _db() -> psycopg.Connection:
@@ -197,6 +227,9 @@ def _smtp_is_configured() -> bool:
 
 
 def _send_email(to_email: str, subject: str, text_body: str) -> None:
+    if EMAIL_DRY_RUN:
+        print(f"[EMAIL_DRY_RUN] To: {to_email} | Subject: {subject}", flush=True)
+        return
     if not _smtp_is_configured():
         raise HTTPException(status_code=503, detail="SMTP is not configured for verification emails")
 
@@ -567,8 +600,9 @@ def _require_min_rank(session_token: Optional[str], minimum_rank: int) -> dict[s
 
 
 def _issue_email_verification_token(cur: psycopg.Cursor, user_id: uuid.UUID) -> tuple[str, datetime]:
-    raw_token, token_hash = _new_token_pair()
-    expires_at = _utc_now() + timedelta(hours=EMAIL_VERIFICATION_HOURS)
+    raw_token = _make_signed_token(EMAIL_VERIFICATION_MINUTES)
+    token_hash = _hash_token(raw_token)
+    expires_at = _utc_now() + timedelta(minutes=EMAIL_VERIFICATION_MINUTES)
     cur.execute("DELETE FROM email_verification_tokens WHERE user_id = %s", (user_id,))
     cur.execute(
         """
@@ -581,7 +615,8 @@ def _issue_email_verification_token(cur: psycopg.Cursor, user_id: uuid.UUID) -> 
 
 
 def _issue_password_reset_token(cur: psycopg.Cursor, user_id: uuid.UUID) -> tuple[str, datetime]:
-    raw_token, token_hash = _new_token_pair()
+    raw_token = _make_signed_token(PASSWORD_RESET_MINUTES)
+    token_hash = _hash_token(raw_token)
     expires_at = _utc_now() + timedelta(minutes=PASSWORD_RESET_MINUTES)
     cur.execute("DELETE FROM password_reset_tokens WHERE user_id = %s", (user_id,))
     cur.execute(
@@ -842,6 +877,21 @@ def startup() -> None:
                 )
                 """
             )
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS email_verification_rate_limit (
+                    id UUID PRIMARY KEY,
+                    user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                    requested_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                )
+                """
+            )
+            cur.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_evrl_user_requested
+                ON email_verification_rate_limit(user_id, requested_at)
+                """
+            )
 
             # Bootstrap one top-rank admin if none exists yet.
             cur.execute("SELECT COUNT(*) AS count FROM users WHERE rank = %s", (SUPER_ADMIN_RANK,))
@@ -865,6 +915,59 @@ def startup() -> None:
                         },
                     )
         conn.commit()
+
+    # Start background cleanup thread
+    t = threading.Thread(target=_token_cleanup_loop, daemon=True)
+    t.start()
+
+
+_CLEANUP_INTERVAL_SECONDS = 86400  # run once daily (HMAC tokens self-expire; cleanup only needed for never-clicked rows)
+
+
+def _token_cleanup_loop() -> None:
+    """Daemon thread: periodically removes expired/used tokens and old rate-limit rows."""
+    while True:
+        try:
+            _purge_expired_tokens()
+        except Exception as exc:  # noqa: BLE001
+            print(f"[cleanup] error during token purge: {exc}")
+        time.sleep(_CLEANUP_INTERVAL_SECONDS)
+
+
+def _purge_expired_tokens() -> None:
+    now = datetime.now(timezone.utc)
+    with _db() as conn:
+        with conn.cursor() as cur:
+            # Expired verification tokens (used ones are deleted immediately on redemption)
+            cur.execute(
+                "DELETE FROM email_verification_tokens WHERE expires_at < %s",
+                (now,),
+            )
+            vt_deleted = cur.rowcount
+
+            # Expired password reset tokens (used ones are deleted immediately on redemption)
+            cur.execute(
+                "DELETE FROM password_reset_tokens WHERE expires_at < %s",
+                (now,),
+            )
+            rt_deleted = cur.rowcount
+
+            # Expired sessions
+            cur.execute("DELETE FROM sessions WHERE expires_at < %s", (now,))
+            sess_deleted = cur.rowcount
+
+            # Rate-limit rows older than 24 h (no longer affect today's quota)
+            cur.execute(
+                "DELETE FROM email_verification_rate_limit WHERE requested_at < %s",
+                (now - timedelta(hours=24),),
+            )
+            rl_deleted = cur.rowcount
+
+        conn.commit()
+    print(
+        f"[cleanup] purged: verification_tokens={vt_deleted}, reset_tokens={rt_deleted}, "
+        f"sessions={sess_deleted}, rate_limit_rows={rl_deleted}"
+    )
 
 
 @app.get("/health")
@@ -1603,36 +1706,26 @@ def auth_login(
 
 @app.post("/auth/verify-email")
 def auth_verify_email(payload: VerifyEmailRequest) -> dict[str, str]:
+    _verify_signed_token(payload.token, "Verification token expired or already used")
     token_hash = _hash_token(payload.token)
     with _db() as conn:
         with conn.cursor() as cur:
             cur.execute(
-                """
-                SELECT user_id, expires_at, used_at
-                FROM email_verification_tokens
-                WHERE token_hash = %s
-                """,
+                "DELETE FROM email_verification_tokens WHERE token_hash = %s RETURNING user_id",
                 (token_hash,),
             )
             row = cur.fetchone()
             if not row:
-                raise HTTPException(status_code=400, detail="Invalid verification token")
-            if row["used_at"] is not None or row["expires_at"] <= _utc_now():
                 raise HTTPException(status_code=400, detail="Verification token expired or already used")
-
             user_id = row["user_id"]
             cur.execute("UPDATE users SET email_verified = TRUE WHERE id = %s", (user_id,))
-            cur.execute(
-                "UPDATE email_verification_tokens SET used_at = NOW() WHERE token_hash = %s",
-                (token_hash,),
-            )
             _insert_security_event(cur, user_id, "email_verified", {"method": "token"})
         conn.commit()
     return {"status": "ok"}
 
 
 @app.post("/auth/resend-verification")
-def auth_resend_verification(payload: VerificationRequest) -> dict[str, Any]:
+def auth_resend_verification(payload: VerificationRequest) -> Any:
     email = _normalize_email(payload.email)
     _validate_email(email)
     with _db() as conn:
@@ -1644,9 +1737,49 @@ def auth_resend_verification(payload: VerificationRequest) -> dict[str, Any]:
             if row["email_verified"]:
                 return {"status": "ok", "already_verified": True}
 
-            raw_verification_token, _ = _issue_email_verification_token(cur, row["id"])
+            user_id = row["id"]
+
+            # Rate limit: max 3 requests per rolling 24 hours.
+            # After the 2nd request a 5-minute cooldown applies before the 3rd.
+            cur.execute(
+                """
+                SELECT requested_at FROM email_verification_rate_limit
+                WHERE user_id = %s AND requested_at > NOW() - INTERVAL '24 hours'
+                ORDER BY requested_at ASC
+                """,
+                (user_id,),
+            )
+            recent = cur.fetchall()
+            count = len(recent)
+
+            if count >= 3:
+                return JSONResponse(
+                    status_code=429,
+                    content={"detail": "Daily limit of 3 verification emails reached. Try again tomorrow."},
+                )
+
+            if count >= 2:
+                most_recent_ts = recent[-1]["requested_at"]
+                seconds_since = (_utc_now() - most_recent_ts).total_seconds()
+                cooldown = 300  # 5 minutes
+                if seconds_since < cooldown:
+                    retry_after = int(cooldown - seconds_since) + 1
+                    return JSONResponse(
+                        status_code=429,
+                        content={
+                            "detail": "Please wait before requesting another verification email.",
+                            "retry_after": retry_after,
+                        },
+                        headers={"Retry-After": str(retry_after)},
+                    )
+
+            cur.execute(
+                "INSERT INTO email_verification_rate_limit (id, user_id) VALUES (%s, %s)",
+                (uuid.uuid4(), user_id),
+            )
+            raw_verification_token, _ = _issue_email_verification_token(cur, user_id)
             verification_link = f"{APP_BASE_URL}/verify.html?token={raw_verification_token}"
-            _insert_security_event(cur, row["id"], "email_verification_sent", {"channel": "app_link"})
+            _insert_security_event(cur, user_id, "email_verification_sent", {"channel": "app_link"})
         conn.commit()
 
     try:
@@ -1690,24 +1823,18 @@ def auth_password_reset_request(payload: VerificationRequest) -> dict[str, Any]:
 @app.post("/auth/password-reset/confirm")
 def auth_password_reset_confirm(payload: PasswordResetConfirmRequest) -> dict[str, str]:
     _validate_password_strength(payload.new_password)
+    _verify_signed_token(payload.token, "Reset token expired or already used")
     token_hash = _hash_token(payload.token)
 
     with _db() as conn:
         with conn.cursor() as cur:
             cur.execute(
-                """
-                SELECT user_id, expires_at, used_at
-                FROM password_reset_tokens
-                WHERE token_hash = %s
-                """,
+                "DELETE FROM password_reset_tokens WHERE token_hash = %s RETURNING user_id",
                 (token_hash,),
             )
             row = cur.fetchone()
             if not row:
-                raise HTTPException(status_code=400, detail="Invalid reset token")
-            if row["used_at"] is not None or row["expires_at"] <= _utc_now():
                 raise HTTPException(status_code=400, detail="Reset token expired or already used")
-
             user_id = row["user_id"]
             salt_hex, password_hash_hex = _hash_password(payload.new_password)
             cur.execute(
@@ -1721,10 +1848,6 @@ def auth_password_reset_confirm(payload: PasswordResetConfirmRequest) -> dict[st
                 WHERE user_id = %s
                 """,
                 (salt_hex, password_hash_hex, user_id),
-            )
-            cur.execute(
-                "UPDATE password_reset_tokens SET used_at = NOW() WHERE token_hash = %s",
-                (token_hash,),
             )
             _insert_security_event(cur, user_id, "password_reset_completed", {"method": "token"})
         conn.commit()

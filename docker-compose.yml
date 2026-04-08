@@ -40,6 +40,8 @@ services:
       SMTP_FROM_EMAIL: ${SMTP_FROM_EMAIL}
       SMTP_USE_SSL: ${SMTP_USE_SSL}
       SMTP_USE_STARTTLS: ${SMTP_USE_STARTTLS}
+      EMAIL_DRY_RUN: ${EMAIL_DRY_RUN:-false}
+      TOKEN_SECRET: ${TOKEN_SECRET}
     depends_on:
       db:
         condition: service_healthy
