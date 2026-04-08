@@ -135,7 +135,10 @@ async function api(path, options = {}) {
 
   if (!res.ok) {
     const detail = payload.detail || payload.error || `Request failed (${res.status})`;
-    throw new Error(detail);
+    const err = new Error(detail);
+    err.status = res.status;
+    err.payload = payload;
+    throw err;
   }
   return payload;
 }
@@ -564,8 +567,74 @@ async function loginManual(event) {
     manualLoginForm.reset();
     await initSession();
   } catch (err) {
-    loginNotice.style.color = '#b42318';
-    loginNotice.textContent = String(err.message || err);
+    const msg = String(err.message || err);
+    if (msg.toLowerCase().includes('email not verified') || msg.toLowerCase().includes('not verified')) {
+      loginNotice.style.color = '';
+      loginNotice.innerHTML = '';
+      const text = document.createElement('span');
+      text.style.color = '#b42318';
+      text.style.fontWeight = '600';
+      text.textContent = 'Your email address has not been verified. ';
+      const resendBtn = document.createElement('button');
+      resendBtn.type = 'button';
+      resendBtn.className = 'toggle-link';
+      resendBtn.style.display = 'inline';
+      resendBtn.style.fontSize = 'inherit';
+      resendBtn.textContent = 'Resend verification email';
+      resendBtn.addEventListener('click', async () => {
+        resendBtn.disabled = true;
+        resendBtn.textContent = 'Sending…';
+        try {
+          await api('/auth/resend-verification', {
+            method: 'POST',
+            body: JSON.stringify({ email: loginEmail.value.trim() }),
+          });
+          loginNotice.style.color = '';
+          loginNotice.innerHTML = '';
+          const ok = document.createElement('span');
+          ok.style.color = '#027a48';
+          ok.style.fontWeight = '600';
+          ok.textContent = 'Verification email sent — check your inbox.';
+          loginNotice.appendChild(ok);
+        } catch (resendErr) {
+          const retryAfter = resendErr?.payload?.retry_after;
+          if (resendErr?.status === 429 && retryAfter && Number.isFinite(retryAfter)) {
+            // Cooldown in effect — count down and re-enable when ready
+            let remaining = Math.ceil(retryAfter);
+            function tick() {
+              if (remaining <= 0) {
+                text.textContent = 'Your email address has not been verified. ';
+                resendBtn.disabled = false;
+                resendBtn.textContent = 'Resend verification email';
+                return;
+              }
+              const m = Math.floor(remaining / 60);
+              const s = remaining % 60;
+              text.textContent = m > 0
+                ? `Please wait ${m}m ${String(s).padStart(2, '0')}s before requesting again. `
+                : `Please wait ${s}s before requesting again. `;
+              remaining--;
+              setTimeout(tick, 1000);
+            }
+            tick();
+          } else if (resendErr?.status === 429) {
+            // Daily limit reached — no retry today
+            text.textContent = 'Daily limit of 3 verification emails reached. Try again tomorrow. ';
+            resendBtn.disabled = true;
+            resendBtn.textContent = 'Limit reached';
+          } else {
+            resendBtn.disabled = false;
+            resendBtn.textContent = 'Resend verification email';
+            text.textContent = 'Could not send verification email. Please try again. ';
+          }
+        }
+      });
+      loginNotice.appendChild(text);
+      loginNotice.appendChild(resendBtn);
+    } else {
+      loginNotice.style.color = '#b42318';
+      loginNotice.textContent = msg;
+    }
   }
 }
 

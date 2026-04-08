@@ -47,13 +47,16 @@ PUBLIC_API_BASE_URL = os.getenv("PUBLIC_API_BASE_URL", "").strip().rstrip("/")
 REQUIRE_EMAIL_VERIFICATION = os.getenv("REQUIRE_EMAIL_VERIFICATION", "true").lower() == "true"
 TOKEN_PREVIEW_IN_RESPONSE = os.getenv("TOKEN_PREVIEW_IN_RESPONSE", "true").lower() == "true"
 SMTP_HOST = os.getenv("SMTP_HOST", "").strip()
-SMTP_PORT = int(os.getenv("SMTP_PORT", "587"))
+SMTP_PORT = int((os.getenv("SMTP_PORT") or "587").strip() or "587")
 SMTP_USERNAME = os.getenv("SMTP_USERNAME", "").strip()
 SMTP_PASSWORD = os.getenv("SMTP_PASSWORD", "")
 SMTP_FROM_EMAIL = os.getenv("SMTP_FROM_EMAIL", "").strip()
 SMTP_USE_SSL = os.getenv("SMTP_USE_SSL", "false").lower() == "true"
 SMTP_USE_STARTTLS = os.getenv("SMTP_USE_STARTTLS", "true").lower() == "true"
 EMAIL_DRY_RUN = os.getenv("EMAIL_DRY_RUN", "false").lower() == "true"
+EMAIL_PROVIDER = os.getenv("EMAIL_PROVIDER", "smtp").strip().lower()
+BREVO_API_KEY = os.getenv("BREVO_API_KEY", "").strip()
+BREVO_API_URL = os.getenv("BREVO_API_URL", "https://api.brevo.com/v3/smtp/email").strip()
 TOKEN_SECRET = os.getenv("TOKEN_SECRET", "")
 
 app.add_middleware(
@@ -245,18 +248,62 @@ def _smtp_is_configured() -> bool:
     return bool(SMTP_HOST and SMTP_FROM_EMAIL)
 
 
-def _send_email(to_email: str, subject: str, text_body: str) -> None:
+def _brevo_api_is_configured() -> bool:
+    return bool(BREVO_API_KEY and SMTP_FROM_EMAIL)
+
+
+def _email_is_configured() -> bool:
+    provider = EMAIL_PROVIDER if EMAIL_PROVIDER in {"smtp", "brevo_api"} else "smtp"
+    if provider == "brevo_api":
+        return _brevo_api_is_configured()
+    return _smtp_is_configured()
+
+
+def _send_email(to_email: str, subject: str, text_body: str, html_body: Optional[str] = None) -> None:
     if EMAIL_DRY_RUN:
         print(f"[EMAIL_DRY_RUN] To: {to_email} | Subject: {subject}", flush=True)
         return
+    provider = EMAIL_PROVIDER if EMAIL_PROVIDER in {"smtp", "brevo_api"} else "smtp"
+
+    if provider == "brevo_api":
+        if not _brevo_api_is_configured():
+            raise HTTPException(status_code=503, detail="Brevo API is not configured for emails")
+        payload: dict[str, Any] = {
+            "sender": {"email": SMTP_FROM_EMAIL},
+            "to": [{"email": to_email}],
+            "subject": subject,
+            "textContent": text_body,
+        }
+        if html_body:
+            payload["htmlContent"] = html_body
+        headers = {
+            "accept": "application/json",
+            "content-type": "application/json",
+            "api-key": BREVO_API_KEY,
+        }
+        try:
+            resp = requests.post(BREVO_API_URL, json=payload, headers=headers, timeout=20)
+            if resp.status_code >= 400:
+                detail = f"Brevo API send failed: HTTP {resp.status_code}"
+                if resp.text:
+                    detail = f"{detail} | {resp.text[:300]}"
+                raise HTTPException(status_code=502, detail=detail)
+            return
+        except HTTPException:
+            raise
+        except Exception as exc:
+            raise HTTPException(status_code=502, detail="Failed to deliver email via Brevo API") from exc
+
     if not _smtp_is_configured():
-        raise HTTPException(status_code=503, detail="SMTP is not configured for verification emails")
+        raise HTTPException(status_code=503, detail="SMTP is not configured for emails")
 
     msg = EmailMessage()
     msg["From"] = SMTP_FROM_EMAIL
     msg["To"] = to_email
     msg["Subject"] = subject
     msg.set_content(text_body)
+    if html_body:
+        msg.add_alternative(html_body, subtype="html")
 
     try:
         if SMTP_USE_SSL:
@@ -276,7 +323,7 @@ def _send_email(to_email: str, subject: str, text_body: str) -> None:
     except HTTPException:
         raise
     except Exception as exc:
-        raise HTTPException(status_code=502, detail="Failed to deliver verification email") from exc
+        raise HTTPException(status_code=502, detail="Failed to deliver email via SMTP") from exc
 
 
 def _normalize_email(email: str) -> str:
@@ -648,29 +695,69 @@ def _issue_password_reset_token(cur: psycopg.Cursor, user_id: uuid.UUID) -> tupl
     return raw_token, expires_at
 
 
-def _send_verification_email(email: str, verification_link: str) -> None:
+def _send_verification_email(email: str, verification_link: str, display_name: str = "") -> None:
+    name = display_name.strip() or "there"
+    text_body = (
+        f"Dear {name},\n\n"
+        "Welcome to Message Vault!\n\n"
+        "Your account has been created. To verify your email address, click here:\n\n"
+        f"  {verification_link}\n\n"
+        "If you have problems with the above link, copy and paste it into your browser.\n\n"
+        "If you did not create this account, you can safely ignore this email.\n\n"
+        "Regards,\nThe TestProd Team"
+    )
+    html_body = f"""<!DOCTYPE html>
+<html>
+<body style="font-family:sans-serif;color:#222;max-width:520px;margin:0 auto;padding:24px">
+  <p>Dear {name},</p>
+  <p>Welcome to <strong>Message Vault</strong>!</p>
+  <p>Your account has been created. To verify your email address, <a href="{verification_link}" style="color:#1d4ed8;font-weight:bold;font-size:17px">click here</a>.</p>
+  <p style="color:#666;font-size:13px">If you have problems with the above link, copy and paste the URL below into your browser:<br>
+    {verification_link}</p>
+  <p style="color:#666;font-size:13px">If you did not create this account, you can safely ignore this email.</p>
+  <hr style="border:none;border-top:1px solid #eee;margin:24px 0">
+  <p style="color:#888;font-size:12px">Regards,<br>The TestProd Team</p>
+</body>
+</html>"""
     _send_email(
         to_email=email,
         subject="Verify your Message Vault account",
-        text_body=(
-            "Welcome to Message Vault.\n\n"
-            "Please verify your email using this link:\n"
-            f"{verification_link}\n\n"
-            "If you did not request this, you can ignore this email."
-        ),
+        text_body=text_body,
+        html_body=html_body,
     )
 
 
-def _send_reset_email(email: str, reset_link: str) -> None:
+def _send_reset_email(email: str, reset_link: str, display_name: str = "") -> None:
+    name = display_name.strip() or "there"
+    text_body = (
+        f"Dear {name},\n\n"
+        "We received a request to reset your Message Vault password.\n\n"
+        "To set a new password, click here:\n\n"
+        f"  {reset_link}\n\n"
+        "If you have problems with the above link, copy and paste it into your browser.\n\n"
+        "This link will expire in 15 minutes.\n\n"
+        "If you did not request a password reset, you can safely ignore this email — your password will not change.\n\n"
+        "Regards,\nThe TestProd Team"
+    )
+    html_body = f"""<!DOCTYPE html>
+<html>
+<body style="font-family:sans-serif;color:#222;max-width:520px;margin:0 auto;padding:24px">
+  <p>Dear {name},</p>
+  <p>We received a request to reset your <strong>Message Vault</strong> password.</p>
+  <p>To set a new password, <a href="{reset_link}" style="color:#1d4ed8;font-weight:bold;font-size:17px">click here</a>.</p>
+  <p style="color:#666;font-size:13px">If you have problems with the above link, copy and paste the URL below into your browser:<br>
+    {reset_link}</p>
+  <p style="color:#666;font-size:13px">This link will expire in <strong>15 minutes</strong>.<br>
+  If you did not request a password reset, you can safely ignore this email — your password will not change.</p>
+  <hr style="border:none;border-top:1px solid #eee;margin:24px 0">
+  <p style="color:#888;font-size:12px">Regards,<br>The TestProd Team</p>
+</body>
+</html>"""
     _send_email(
         to_email=email,
         subject="Reset your Message Vault password",
-        text_body=(
-            "A password reset was requested for your account.\n\n"
-            "Use this link to set a new password:\n"
-            f"{reset_link}\n\n"
-            "If you did not request this, you can ignore this email."
-        ),
+        text_body=text_body,
+        html_body=html_body,
     )
 
 
@@ -999,6 +1086,8 @@ def health() -> dict[str, Any]:
         "github_sso_configured": bool(GITHUB_CLIENT_ID and GITHUB_CLIENT_SECRET),
         "oidc_provider_count": len(_load_oidc_providers()),
         "rbac_enabled": True,
+        "email_provider": EMAIL_PROVIDER if EMAIL_PROVIDER in {"smtp", "brevo_api"} else "smtp",
+        "email_configured": _email_is_configured(),
         "smtp_configured": _smtp_is_configured(),
     }
 
@@ -1619,7 +1708,7 @@ def auth_register(
 
     if verification_link:
         try:
-            _send_verification_email(email, verification_link)
+            _send_verification_email(email, verification_link, display_name)
         except Exception:
             pass  # Email delivery failure is non-fatal; user can resend from login page
 
@@ -1798,11 +1887,14 @@ def auth_resend_verification(payload: VerificationRequest) -> Any:
             )
             raw_verification_token, _ = _issue_email_verification_token(cur, user_id)
             verification_link = f"{APP_BASE_URL}/verify.html?token={raw_verification_token}"
+            cur.execute("SELECT display_name FROM users WHERE id = %s", (user_id,))
+            dn_row = cur.fetchone()
+            display_name = dn_row["display_name"] if dn_row else ""
             _insert_security_event(cur, user_id, "email_verification_sent", {"channel": "app_link"})
         conn.commit()
 
     try:
-        _send_verification_email(email, verification_link)
+        _send_verification_email(email, verification_link, display_name)
     except Exception:
         pass  # Non-fatal; token is saved, user can retry
     return {"status": "ok"}
@@ -1816,7 +1908,7 @@ def auth_password_reset_request(payload: VerificationRequest) -> dict[str, Any]:
         with conn.cursor() as cur:
             cur.execute(
                 """
-                SELECT u.id
+                SELECT u.id, u.display_name
                 FROM users u
                 JOIN user_password_credentials c ON c.user_id = u.id
                 WHERE u.email = %s
@@ -1829,11 +1921,12 @@ def auth_password_reset_request(payload: VerificationRequest) -> dict[str, Any]:
 
             raw_token, _ = _issue_password_reset_token(cur, row["id"])
             reset_link = f"{APP_BASE_URL}/reset-password.html?token={raw_token}"
+            display_name = row["display_name"] or ""
             _insert_security_event(cur, row["id"], "password_reset_requested", {"channel": "app_link"})
         conn.commit()
 
     try:
-        _send_reset_email(email, reset_link)
+        _send_reset_email(email, reset_link, display_name)
     except Exception:
         pass  # Non-fatal; token is saved, client should display the link or prompt retry
     return {"status": "ok"}
